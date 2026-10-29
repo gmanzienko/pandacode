@@ -4,6 +4,7 @@
 // press or the row's Steer steers; "Steer instead of queue" swaps them. Stop shows while running, is
 // the screen's only Stop, stays live during a slow send, and confirms once a run has gone on a while.
 // Unreachable computers keep the message in the outbox.
+// A team send waits only for the architect turn.
 // In a bot's conversation (`bot`) a send goes through the bot (bot.message), so its brief applies.
 // Slash commands: `/` at the start opens SlashMenu (slash.list); a sent command is resolved on the host
 // (slash.resolve) and either sent as text or mapped to a phone screen, and `/btw …` opens the btw sheet.
@@ -126,8 +127,10 @@ function TrayMeasure({ children, onWidth }: { children: ReactNode; onWidth: (wid
   return <View onLayout={e => onWidth(e.nativeEvent.layout.width)}>{children}</View>;
 }
 
-export function Composer({ deviceId, sessionId, running, waiting, bot }: { deviceId: string; sessionId: string; running: boolean; waiting?: boolean; bot?: Pick<Bot, 'id' | 'name'> }) {
+export function Composer({ deviceId, sessionId, running, waiting, team, bot }: { deviceId: string; sessionId: string; running: boolean; waiting?: boolean; team?: boolean; bot?: Pick<Bot, 'id' | 'name'> }) {
   const botId = bot?.id;
+  // A team's follow-up reaches the architect as soon as its own turn ends, so it never waits for the run.
+  const architect = !!team && !botId;
   const colors = useColors();
   // The text lives in the draft store, so generative UI can fill it (fillDraft) and it survives leaving the task.
   const key = draftKey(deviceId, sessionId);
@@ -294,7 +297,7 @@ export function Composer({ deviceId, sessionId, running, waiting, bot }: { devic
         haptic('light');
         // task.steer takes no images: with images a steer queues like a send.
         const result = await sendOrQueue(deviceId, sessionId, prompt, images);
-        const outcome = result.outbox ? 'Saved. Sends when the computer is back' : result.queued ? 'Queued for after this run' : '';
+        const outcome = result.outbox ? 'Saved. Sends when the computer is back' : result.queued ? (architect ? 'Queued for the next architect turn' : 'Queued for after this run') : '';
         if (result.queued && queueSupported) loadQueue(deviceId, sessionId).catch(() => undefined);
         leaveNote(outcome);
         AccessibilityInfo.announceForAccessibility(outcome || 'Sent');
@@ -314,11 +317,12 @@ export function Composer({ deviceId, sessionId, running, waiting, bot }: { devic
   const canSend = hasText || attach.pending.length > 0;
   // While running, a tap does the preferred action and a long press the other one.
   // task.steer takes no images, so with images attached the button queues and says so.
-  const canSteer = running && !botId && !waiting && !attach.hasImages;
+  const canSteer = running && !botId && !team && !waiting && !attach.hasImages;
   const tap = canSteer && steer ? 'steer' : 'send';
   const hold = canSteer ? (steer ? 'send' : 'steer') : undefined;
   // While a request waits, the card owns the moment: a send just queues, and there's no steering past it.
-  const steerable = running && !botId && !waiting;
+  const steerable = running && !botId && !team && !waiting;
+  const queue = running && !architect;
   const fit = trayFit(trayWidth, { ...widths, branch: labels.branch ? widths.branch : 0, effort: labels.effort ? widths.effort : 0 }, labels.mode === 'full');
   const modeIcon: IconName = labels.mode === 'full' ? { ios: 'lock.open', android: 'lock_open' } : { ios: 'lock', android: 'lock' };
   return (
@@ -350,7 +354,7 @@ export function Composer({ deviceId, sessionId, running, waiting, bot }: { devic
           value={text}
           onChangeText={t => { setText(t); if (note.text) setNote({ text: '', stamp: '' }); }}
           onSelectionChange={e => setSelection(e.nativeEvent.selection)}
-          placeholder={busy && attach.hasImages ? 'Sending attachments…' : shownNote || (bot ? `Message ${bot.name}…` : running && steer ? 'Steer the agent…' : 'Ask the agent…')}
+          placeholder={busy && attach.hasImages ? 'Sending attachments…' : shownNote || (bot ? `Message ${bot.name}…` : running && steer ? 'Steer the agent…' : architect ? 'Message the architect…' : 'Ask the agent…')}
           placeholderTextColor={colors.faint}
           multiline
           style={[styles.input, { color: colors.text }]}
@@ -367,8 +371,8 @@ export function Composer({ deviceId, sessionId, running, waiting, bot }: { devic
             )}
             {canSend && (
               <SpringIn>
-                <Round label={tap === 'steer' ? 'Steer' : running ? 'Queue' : 'Send'} hint={hold && (hold === 'steer' ? 'Long press to steer' : 'Long press to queue')}
-                  ios={running ? (tap === 'steer' ? 'arrow.uturn.right' : 'list.number') : 'arrow.up'} android={running ? (tap === 'steer' ? 'alt_route' : 'format_list_numbered') : 'arrow_upward'}
+                <Round label={tap === 'steer' ? 'Steer' : queue ? 'Queue' : 'Send'} hint={hold && (hold === 'steer' ? 'Long press to steer' : queue ? 'Long press to queue' : 'Long press to send')}
+                  ios={queue ? (tap === 'steer' ? 'arrow.uturn.right' : 'list.number') : 'arrow.up'} android={queue ? (tap === 'steer' ? 'alt_route' : 'format_list_numbered') : 'arrow_upward'}
                   onPress={() => act(tap)} onLongPress={hold && (() => act(hold))} disabled={busy || !sendAllowed} bg={colors.primary} fg={colors.onPrimary} />
               </SpringIn>
             )}
