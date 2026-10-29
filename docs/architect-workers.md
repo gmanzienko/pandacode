@@ -4,7 +4,8 @@ By default, **Team** opens a menu that turns an automatic team led by the
 selected model on or off. While its model catalog and setup are loading, the
 button highlights immediately and shows a busy indicator. Sending and
 model/permission changes wait for setup to finish, and queued follow-ups go out
-once it does; the prompt stays editable. A failed save shows in the menu and
+once it does; the prompt stays editable. During an active team, user follow-ups start a
+new architect turn as soon as its current turn ends, without stopping workers. A failed save shows in the menu and
 leaves the saved team as it was. Settings → Agents → **Classic team setup** opens the
 manual setup described below instead.
 
@@ -280,6 +281,8 @@ Select a worker to see its latest progress checkpoint alongside its transcript.
   a message cut this way stays unread so the worker can read the rest. `delivered`
   says `sent` (handed to the run, which may still refuse it, leaving it unread) or
   `mailbox`. The architect is never steered.
+  User follow-ups wait only for its current turn to end, then start a new turn
+  while workers continue.
 - `pandacode_read_team_mailbox` reads only messages addressed to the calling agent,
   with a cursor for incremental reads. Every team tool result carries a digest of
   unread messages, so agents never poll. Agent identities are bound by the host;
