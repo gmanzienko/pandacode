@@ -210,7 +210,8 @@ export default function TaskScreen() {
 
   const requests = approvals.length + inputs.length > 0;
   // A team still working keeps Stop (which pauses it on the host) and queued sends.
-  const running = isActive(status) || teamBusy(rowTeam(task, team));
+  const teamActive = teamBusy(rowTeam(task, team));
+  const running = isActive(status) || teamActive;
   const waiting = requests || status === 'waiting';
   useRunEnded(running, status);
   // A gentle tap when a request arrives while the thread is open; one already waiting at open is just there.
@@ -256,7 +257,7 @@ export default function TaskScreen() {
             </Animated.View>
           )}
           <Animated.View layout={layout} style={{ paddingBottom: dockInset }} onLayout={e => setComposerHeight(e.nativeEvent.layout.height)}>
-            <Composer key={key} deviceId={device} sessionId={session} running={running} waiting={waiting} bot={bot} />
+            <Composer key={key} deviceId={device} sessionId={session} running={running} waiting={waiting} team={teamActive} bot={bot} />
           </Animated.View>
         </Animated.View>
       </View>
