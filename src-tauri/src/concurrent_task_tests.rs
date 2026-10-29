@@ -1111,9 +1111,10 @@ fn other_lead_messages_still_start_a_team_turn() {
     ] {
         let (state, sid) = settled_team_lead("claude", "review", "completed");
         advertise_claude_commands(&state, &sid);
-        let architect::LeadSend::Team(team, admission) = send_to_lead(&state, &sid, text).unwrap() else {
+        let architect::LeadSend::Team(team, admission, followup) = send_to_lead(&state, &sid, text).unwrap() else {
             panic!("{text} must go to the team");
         };
+        assert!(!followup, "a settled team starts a new objective");
         assert_eq!((team.objective.as_str(), team.generation), (text, 5));
         let (tx, _rx) = unbounded_channel();
         let prepared = prepare_task_run_in_project(
