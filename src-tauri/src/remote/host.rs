@@ -1884,9 +1884,12 @@ async fn deliver_prompt(app: &tauri::AppHandle, session_id: String, text: String
     let state = app.state::<AppState>();
     let _turn = task_send_lock(&session_id).await;
     let busy = || crate::run_requests::lock_agents(&state.agents).map(|agents| agents.contains_key(&session_id)).map_err(|e| e.to_string());
-    if busy()? {
+    let queue = || {
         let queued: Vec<Value> = image_ids.iter().map(|id| json!({"kind": "image", "id": id, "name": "Image", "width": 0, "height": 0, "thumbnail": "", "source": "file"})).collect();
-        let entry = message_queue::add(&*state.store.lock().map_err(|e| e.to_string())?, &session_id, &text, &json!(queued))?;
+        message_queue::add(&*state.store.lock().map_err(|e| e.to_string())?, &session_id, &text, &json!(queued))
+    };
+    if busy()? {
+        let entry = queue()?;
         // If the run ended between the check and the add, nothing would deliver the
         // entry: take it back (unless a run end already did) and send it now.
         if busy()? || message_queue::withdraw(&*state.store.lock().map_err(|e| e.to_string())?, &entry.id).is_err() {
@@ -1895,7 +1898,12 @@ async fn deliver_prompt(app: &tauri::AppHandle, session_id: String, text: String
         }
     }
     let before = newest_user_message(&state, &session_id)?;
-    if let Err(error) = crate::send_message(app.clone(), state.clone(), session_id.clone(), text, Some(image_ids), None).await {
+    if let Err(error) = crate::send_message(app.clone(), state.clone(), session_id.clone(), text.clone(), Some(image_ids.clone()), None).await {
+        if error == crate::architect::ARCHITECT_BUSY {
+            queue()?;
+            let _ = app.emit("queue-changed", json!({"sessionId": session_id}));
+            return Ok(json!({"queued": true}));
+        }
         // Saved, then the harness failed to start: a retry must not save the prompt again.
         let saved = newest_user_message(&state, &session_id).is_ok_and(|after| after > before);
         let _ = app.emit("sessions-changed", ());
