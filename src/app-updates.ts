@@ -12,6 +12,7 @@ import { call, preview } from './bridge';
 import { CHECK_EVERY, downloadsOnItsOwn, parseUpdateMode, restartNow, updatePrompt, type UpdateMode, type UpdateState } from './app-updates-policy';
 import { PROJECT_LINKS } from './about-settings';
 import { errorText } from './error-text';
+import config from '../src-tauri/tauri.conf.json';
 export { describeUpdate, type UpdateMode, type UpdateState } from './app-updates-policy';
 
 export interface UpdatesHost {
@@ -44,6 +45,13 @@ let instance: AppUpdates | undefined;
 export const appUpdates = (): AppUpdates | undefined => instance;
 
 export function startAppUpdates(host: UpdatesHost): AppUpdates {
+  // A fork without an update feed must ignore saved modes and explicit update requests.
+  if (!config.plugins.updater.endpoints.length) {
+    return instance = {
+      state: { kind: 'off' }, mode: 'off', supported: false, installable: false,
+      subscribe: () => () => {}, setMode: () => {}, check: async () => {}, restart: async () => {}, openReleases: async () => {},
+    };
+  }
   const listeners = new Set<() => void>();
   let state: UpdateState = preview ? { kind: 'off' } : { kind: 'idle' };
   let mode: UpdateMode = (() => { try { return parseUpdateMode(localStorage.getItem(KEY)); } catch { return 'automatic' as const; } })();
