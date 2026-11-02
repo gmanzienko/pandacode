@@ -937,6 +937,7 @@ fn settled_team_lead(provider: &str, stage: &str, status: &str) -> (Arc<AppState
                     provider: "codex".into(),
                     model: "default".into(),
                     reasoning_effort: None,
+                    service_tier: None,
                 }],
                 catalog: Vec::new(),
                 max_parallel: 3,
@@ -984,6 +985,8 @@ fn settled_team_lead(provider: &str, stage: &str, status: &str) -> (Arc<AppState
             score_nudged: false,
             wrote_at: 0,
             tool_catalog_version: 0,
+            service_tier: None,
+            launch_note: None,
         });
         store.db.execute(
             "INSERT INTO architect_teams(session_id,content) VALUES(?1,?2)",

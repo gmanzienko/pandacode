@@ -69,7 +69,9 @@ export function createPreviewArchitect(host: PreviewHost) {
       const models = host.models(profile.provider);
       const model = profile.model ? models.find(model => model.id === profile.model) : models[0];
       if (profile.reasoningEffort != null && (typeof profile.reasoningEffort !== 'string' || profile.reasoningEffort.length > 32 || model && !model.reasoningEfforts?.some(effort => effort.id === profile.reasoningEffort))) throw new Error('This worker model does not support that reasoning effort.');
-      return { id: profile.id, name: profile.name.trim(), provider: profile.provider, model: profile.model, reasoningEffort: profile.reasoningEffort ?? null };
+      // Like the native check: tier names, Codex workers only.
+      if (profile.serviceTier != null && (profile.provider !== 'codex' || !['fast', 'ultrafast'].includes(profile.serviceTier))) throw new Error(`${profile.name.trim()}: only Codex workers take a speed tier (fast or ultrafast).`);
+      return { id: profile.id, name: profile.name.trim(), provider: profile.provider, model: profile.model, reasoningEffort: profile.reasoningEffort ?? null, ...(profile.serviceTier ? { serviceTier: profile.serviceTier } : {}) };
     });
     if (config.workspace !== 'shared') throw new Error('Workers must use the task’s shared workspace.');
     if (config.rosterOnly && (!config.auto || !workers.length)) throw new Error('A named agent team needs at least one model.');

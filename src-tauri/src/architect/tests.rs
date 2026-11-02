@@ -892,6 +892,7 @@ fn config() -> TeamConfig {
             provider: "codex".into(),
             model: "default".into(),
             reasoning_effort: None,
+            service_tier: None,
         }],
         max_parallel: 3,
         max_rounds: 5,
@@ -977,6 +978,8 @@ fn worker(id: &str, status: &str, files: &[&str], depends: &[&str]) -> Worker {
         council: None,
         score_nudged: false,
         wrote_at: 0,
+        service_tier: None,
+        launch_note: None,
     }
 }
 #[test]
@@ -1164,6 +1167,7 @@ fn state_fixture() -> (AppState, String) {
         provider: "kimi".into(),
         model: String::new(),
         reasoning_effort: None,
+        service_tier: None,
     });
     let sid = team.session_id.clone();
     save(&store, &mut team).unwrap();
@@ -1996,9 +2000,9 @@ fn auto_config_allows_an_empty_or_large_roster_but_not_unbounded() {
     config.auto = true;
     config.workers.clear();
     assert!(config.validate().is_ok());
-    config.workers = (0..AUTO_ROSTER_MAX).map(|i| WorkerProfile { id: format!("m{i}"), name: format!("Model {i}"), provider: "codex".into(), model: format!("m{i}"), reasoning_effort: None }).collect();
+    config.workers = (0..AUTO_ROSTER_MAX).map(|i| WorkerProfile { id: format!("m{i}"), name: format!("Model {i}"), provider: "codex".into(), model: format!("m{i}"), reasoning_effort: None, service_tier: None }).collect();
     assert!(config.validate().is_ok());
-    config.workers.push(WorkerProfile { id: "extra".into(), name: "Extra".into(), provider: "codex".into(), model: "x".into(), reasoning_effort: None });
+    config.workers.push(WorkerProfile { id: "extra".into(), name: "Extra".into(), provider: "codex".into(), model: "x".into(), reasoning_effort: None, service_tier: None });
     assert_eq!(config.validate().unwrap_err(), "A team can list at most 24 models, to keep the lead's prompt short; this one lists 25.");
     let mut manual = super::tests::config();
     manual.workers.clear();
@@ -2024,7 +2028,7 @@ fn roster_only_state(lead_in_roster: bool) -> (AppState, String) {
         team.config.name = Some("Reviewers".into());
         if lead_in_roster {
             let lead = store.session(&sid).unwrap();
-            team.config.workers.push(WorkerProfile { id: "lead".into(), name: "Lead".into(), provider: lead.provider, model: lead.model, reasoning_effort: Some("high".into()) });
+            team.config.workers.push(WorkerProfile { id: "lead".into(), name: "Lead".into(), provider: lead.provider, model: lead.model, reasoning_effort: Some("high".into()), service_tier: None });
         }
         save(&store, &mut team).unwrap();
     }
@@ -2483,7 +2487,7 @@ fn lead_guidance_takes_any_plain_text() {
 
 // Panda Router: `profileId: "auto"` and route_models, routed by the keyword heuristic.
 fn profile(id: &str, provider: &str, model: &str, name: &str) -> WorkerProfile {
-    WorkerProfile { id: id.into(), name: name.into(), provider: provider.into(), model: model.into(), reasoning_effort: None }
+    WorkerProfile { id: id.into(), name: name.into(), provider: provider.into(), model: model.into(), reasoning_effort: None, service_tier: None }
 }
 fn routing_catalog() -> Vec<WorkerProfile> {
     vec![
@@ -4935,4 +4939,101 @@ fn a_failed_followup_launch_only_clears_its_reservation() {
     assert_eq!((after.status, after.generation, after.workers[0].status.clone()), (before.status, before.generation, before.workers[0].status.clone()));
     // The next message is accepted again.
     assert!(start_state(&state, &sid, "Retry", None, None).is_ok());
+}
+#[test]
+fn worker_speed_tiers_keep_old_profiles_loading_and_accept_only_codex_tier_names() {
+    // Saved before speed tiers: loads with none, and saves without the field.
+    let old: WorkerProfile = serde_json::from_value(json!({"id":"a","name":"A","provider":"codex","model":"m","reasoningEffort":"high"})).unwrap();
+    assert_eq!(old.service_tier, None);
+    assert!(serde_json::to_value(&old).unwrap().get("serviceTier").is_none());
+    assert!(serde_json::from_value::<WorkerProfile>(json!({"id":"a","name":"A","provider":"codex","model":"m","speed":"fast"})).is_err());
+    let old_worker: Worker = serde_json::from_value(json!({"id":"w","sessionId":"s","name":"w","profileId":"a","provider":"codex","model":"m","reasoningEffort":null,"status":"queued","assignment":"x","summary":"","error":null,"dependsOn":[],"files":[],"attempt":1,"createdAt":1,"updatedAt":1})).unwrap();
+    assert_eq!((old_worker.service_tier, old_worker.launch_note), (None, None));
+    let mut c = config();
+    for tier in ["fast", "ultrafast"] {
+        c.workers[0].service_tier = Some(tier.into());
+        assert!(c.validate().is_ok(), "{tier}");
+        // The lead sees it in the profiles JSON only when it is set.
+        assert!(serde_json::to_string(&c.workers).unwrap().contains(&format!("\"serviceTier\":\"{tier}\"")));
+    }
+    for tier in ["priority", "Fast", "turbo", ""] {
+        c.workers[0].service_tier = Some(tier.into());
+        assert!(c.validate().unwrap_err().contains("\"fast\" or \"ultrafast\""), "{tier}");
+    }
+    c.workers[0].service_tier = Some("fast".into());
+    c.workers[0].provider = "claude".into();
+    assert!(c.validate().unwrap_err().contains("only Codex workers"));
+}
+#[test]
+fn a_codex_worker_starts_at_its_profiles_speed_tier_or_the_default_with_a_note() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.config.workers[0].service_tier = Some("ultrafast".into());
+        save(&store, &mut team).unwrap();
+    }
+    call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[assignment("one","fast","src/a"),assignment("two","fast","src/b"),assignment("three","kimi","src/c")]})).unwrap();
+    let store = state.store.lock().unwrap();
+    let team = load(&store, &sid).unwrap().unwrap();
+    assert_eq!(team.workers[0].service_tier.as_deref(), Some("ultrafast"));
+    assert_eq!(team.workers[2].service_tier, None, "a Kimi profile has no speed tier");
+    let admission = Admission { parent: sid.clone(), generation: team.generation };
+    let (one, two, three) = (team.workers[0].session_id.clone(), team.workers[1].session_id.clone(), team.workers[2].session_id.clone());
+    // Nothing is chosen at dispatch: the session waits for its launch.
+    assert_eq!(store.session(&one).unwrap().codex_settings, None);
+    let (_, model, tier) = speed_request(&store, &admission, &one).unwrap().unwrap();
+    assert_eq!((model.as_str(), tier.as_str()), ("default", "ultrafast"));
+    assert!(speed_request(&store, &admission, &three).unwrap().is_none());
+    assert!(speed_request(&store, &admission, &sid).unwrap().is_none(), "never the lead");
+    // The catalog has it: the session starts with its catalog id, looked up once.
+    assert!(apply_speed(&store, &admission, &one, &model, &tier, Ok("ultrafast".into())).unwrap().is_none());
+    assert_eq!(store.session(&one).unwrap().codex_settings, Some(json!({"serviceTier":"ultrafast"})));
+    assert!(speed_request(&store, &admission, &one).unwrap().is_none());
+    // The catalog lacks it: default speed, a note for the lead, and the launch goes on.
+    let error = "Ultrafast is not available for this model in the installed Codex catalog.";
+    let noted = apply_speed(&store, &admission, &two, &model, &tier, Err(error.into())).unwrap().unwrap();
+    assert_eq!(store.session(&two).unwrap().codex_settings, Some(json!({"serviceTier":null})));
+    assert!(speed_request(&store, &admission, &two).unwrap().is_none());
+    let note = noted.workers[1].launch_note.clone().unwrap();
+    assert!(note.starts_with("Ultrafast speed unavailable for default (") && note.ends_with("; started at default speed."), "{note}");
+    assert_eq!(summaries(&noted, 0, None)["workers"][1]["note"], note);
+    assert_eq!(noted.workers[1].status, "queued");
+    // A worker that moved to another model meanwhile is left for its next launch.
+    assert!(apply_speed(&store, &admission, &one, "other-model", &tier, Ok("x".into())).unwrap().is_none());
+    assert_eq!(store.session(&one).unwrap().codex_settings, Some(json!({"serviceTier":"ultrafast"})));
+}
+#[test]
+fn failover_to_another_harness_drops_the_codex_speed_tier() {
+    let model = "gpt-tier-failover";
+    let (state, sid) = auto_state();
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.config.catalog = ["codex", "opencode"].iter().map(|p| profile(&format!("{p}-m"), p, model, model)).collect();
+        let mut roster = profile("tiered", "codex", model, "Tiered");
+        roster.service_tier = Some("fast".into());
+        team.config.workers.push(roster);
+        save(&store, &mut team).unwrap();
+    }
+    // A direct provider/model assignment takes the matching roster profile's tier.
+    call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[auto_assignment("fo", json!({"provider":"codex","model":model}))]})).unwrap();
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    {
+        let store = state.store.lock().unwrap();
+        let (_, wanted, tier) = speed_request(&store, &action.admission, &action.sid).unwrap().unwrap();
+        assert_eq!(tier, "fast");
+        apply_speed(&store, &action.admission, &action.sid, &wanted, &tier, Ok("priority".into())).unwrap();
+        assert_eq!(store.session(&action.sid).unwrap().codex_settings, Some(json!({"serviceTier":"priority"})));
+    }
+    let (run, _rx) = claim(&state, action);
+    settle(&state, &run, false, false);
+    let store = state.store.lock().unwrap();
+    let worker = load(&store, &sid).unwrap().unwrap().workers[0].clone();
+    assert_eq!((worker.status.as_str(), worker.provider.as_str()), ("queued", "opencode"));
+    assert_eq!(worker.service_tier, None);
+    let session = store.session(&worker.session_id).unwrap();
+    assert_eq!((session.provider.as_str(), session.codex_settings), ("opencode", None));
+    drop(store);
+    crate::model_health::record_success("codex", model);
 }

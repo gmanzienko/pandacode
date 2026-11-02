@@ -12,7 +12,7 @@ import { bindFileLinkContext, refreshFileLinks, type FileLinkContext } from './f
 import { createAgentInput, type AgentInput } from './agent-input';
 import { TailText } from './tail-text';
 import { decodeToolActivity, renderToolActivity } from './tool-activity';
-import { LEAD_RETRY, teamActive, teamHeldUntil, type TeamConfig, type TeamSnapshot, type TeamWorker, type ModelSelection, type TeamLibrary, type TeamSetup } from './architect-types';
+import { LEAD_RETRY, teamActive, teamHeldUntil, type TeamConfig, type ServiceTierName, speedOptions, type TeamSnapshot, type TeamWorker, type ModelSelection, type TeamLibrary, type TeamSetup } from './architect-types';
 import { resetTime } from './usage-limit';
 import { mountTeamProfiles } from './team-profiles';
 import { infoMark } from './tooltip';
@@ -162,10 +162,10 @@ export function mountArchitectSetup(host: HTMLElement, options: SetupOptions): S
   const error = host.querySelector<HTMLElement>('.architect-setup-error')!;
   const libraryHost = document.createElement('section');
   form.prepend(libraryHost);
-  const disabledControls = new Map<HTMLInputElement | HTMLButtonElement | HTMLTextAreaElement, boolean>();
+  const disabledControls = new Map<HTMLInputElement | HTMLButtonElement | HTMLTextAreaElement | HTMLSelectElement, boolean>();
   function setBusy(value: boolean): void {
     pending = value;
-    if (value) { picker?.(); form.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLTextAreaElement>('input,button,textarea').forEach(el => { disabledControls.set(el, el.disabled); el.disabled = true; }); }
+    if (value) { picker?.(); form.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLTextAreaElement | HTMLSelectElement>('input,button,textarea,select').forEach(el => { disabledControls.set(el, el.disabled); el.disabled = true; }); }
     else { disabledControls.forEach((disabled, el) => { el.disabled = disabled; }); disabledControls.clear(); }
   }
   function readSetup(): TeamSetup {
@@ -184,20 +184,25 @@ export function mountArchitectSetup(host: HTMLElement, options: SetupOptions): S
   });
   form.addEventListener('input', () => savedProfiles.changed());
   host.querySelector<HTMLButtonElement>('.architect-guidance-reset')!.addEventListener('click', () => { guidanceField.value = ''; guidanceField.focus(); savedProfiles.changed(); });
-  function choose(anchor: HTMLButtonElement, selection: ModelSelection, canSwitchProvider: boolean): void {
+  form.addEventListener('invalid', event => { (event.target as HTMLElement).closest('details')?.setAttribute('open', ''); }, true);
+  function choose(anchor: HTMLButtonElement, selection: ModelSelection, canSwitchProvider: boolean, onProvider?: () => void): void {
     picker?.();
     picker = openModelPicker({ anchor, providers, current: { ...selection, model: selection.model || 'default' }, canSwitchProvider, loadModels: options.loadModels,
-      onSelect: async (provider, model) => { selection.provider = provider; selection.model = model; selection.reasoningEffort = null; anchor.innerHTML = modelMarkup(selection, providers); savedProfiles.changed(); },
+      onSelect: async (provider, model) => { selection.provider = provider; selection.model = model; selection.reasoningEffort = null; anchor.innerHTML = modelMarkup(selection, providers); onProvider?.(); savedProfiles.changed(); },
       onEffortSelect: async effort => { selection.reasoningEffort = effort; anchor.innerHTML = modelMarkup(selection, providers); savedProfiles.changed(); },
       onClose: () => { picker = undefined; },
     });
   }
   function renderProfiles(): void {
-    profiles.innerHTML = config.workers.map((profile, index) => `<div class="architect-profile" data-profile-id="${escape(profile.id)}"><div class="architect-profile-heading"><span class="architect-profile-number">${index + 1}</span><input aria-label="Worker profile ${index + 1} name" maxlength="60" value="${escape(profile.name)}"><button type="button" class="icon-button" aria-label="Remove worker profile ${index + 1}" ${config.workers.length === 1 ? 'disabled' : ''}>${icon('close')}</button></div><button type="button" class="architect-model" aria-label="Choose model for worker ${index + 1}" aria-haspopup="dialog" aria-expanded="false">${modelMarkup(profile, providers)}</button></div>`).join('');
+    profiles.innerHTML = config.workers.map((profile, index) => `<div class="architect-profile" data-profile-id="${escape(profile.id)}"><div class="architect-profile-heading"><span class="architect-profile-number">${index + 1}</span><input aria-label="Worker profile ${index + 1} name" maxlength="60" value="${escape(profile.name)}"><button type="button" class="icon-button" aria-label="Remove worker profile ${index + 1}" ${config.workers.length === 1 ? 'disabled' : ''}>${icon('close')}</button></div><div class="architect-profile-model"><button type="button" class="architect-model" aria-label="Choose model for worker ${index + 1}" aria-haspopup="dialog" aria-expanded="false">${modelMarkup(profile, providers)}</button><select class="architect-speed" aria-label="Speed for worker ${index + 1}" ${profile.provider === 'codex' ? '' : 'hidden'}>${speedOptions(profile.serviceTier)}</select></div></div>`).join('');
     profiles.querySelectorAll<HTMLElement>('.architect-profile').forEach((row, index) => {
       row.querySelector('input')!.addEventListener('input', event => { config.workers[index].name = (event.target as HTMLInputElement).value; });
       row.querySelector('.icon-button')!.addEventListener('click', () => { picker?.(); config.workers.splice(index, 1); renderProfiles(); savedProfiles.changed(); });
-      row.querySelector<HTMLButtonElement>('.architect-model')!.addEventListener('click', event => choose(event.currentTarget as HTMLButtonElement, config.workers[index], true));
+      const speed = row.querySelector<HTMLSelectElement>('.architect-speed')!;
+      // A speed tier is Codex's: another harness drops it.
+      const syncSpeed = () => { const profile = config.workers[index]; speed.hidden = profile.provider !== 'codex'; if (speed.hidden) { delete profile.serviceTier; speed.value = ''; } };
+      speed.addEventListener('change', () => { const value = speed.value as '' | ServiceTierName; if (value) config.workers[index].serviceTier = value; else delete config.workers[index].serviceTier; savedProfiles.changed(); });
+      row.querySelector<HTMLButtonElement>('.architect-model')!.addEventListener('click', event => choose(event.currentTarget as HTMLButtonElement, config.workers[index], true, syncSpeed));
     });
   }
   renderProfiles();
