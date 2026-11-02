@@ -787,19 +787,47 @@ async fn conversation_messages_with_on(
 
 /// Fast is a catalog capability, never an invented model setting.
 pub async fn fast_service_tier(cwd: &Path, model: &str) -> Result<String, String> {
+    service_tier(cwd, model, "fast").await
+}
+
+/// One speed tier the Codex catalog offers for a model (`priority` is named Fast).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ServiceTier {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+}
+
+fn valid_model(model: &str) -> Result<(), String> {
     if model.len() > 200 || model.chars().any(char::is_control) {
         return Err("Invalid Codex model.".into());
     }
+    Ok(())
+}
+
+/// The catalog id of the speed tier `wanted` names (by id or name, any case), for this model.
+pub async fn service_tier(cwd: &Path, model: &str, wanted: &str) -> Result<String, String> {
+    valid_model(model)?;
+    if wanted.is_empty() || wanted.len() > 64 || wanted.chars().any(char::is_control) {
+        return Err("Invalid Codex speed tier.".into());
+    }
     let mut client = ControlClient::start(cwd).await?;
-    let result = fast_tier_with(&mut client, model).await;
+    let result = tier_with(&mut client, model, wanted).await;
+    client.finish().await;
+    result
+}
+
+/// Every speed tier the installed Codex catalog lists for this model, at most 16.
+pub async fn service_tiers(cwd: &Path, model: &str) -> Result<Vec<ServiceTier>, String> {
+    valid_model(model)?;
+    let mut client = ControlClient::start(cwd).await?;
+    let result = tiers_with(&mut client, model).await;
     client.finish().await;
     result
 }
 
 pub async fn resolved_model(cwd: &Path, model: &str) -> Result<String, String> {
-    if model.len() > 200 || model.chars().any(char::is_control) {
-        return Err("Invalid Codex model.".into());
-    }
+    valid_model(model)?;
     let mut client = ControlClient::start(cwd).await?;
     let result = model_metadata(&mut client, model).await;
     client.finish().await;
@@ -807,24 +835,64 @@ pub async fn resolved_model(cwd: &Path, model: &str) -> Result<String, String> {
     nonempty(&item["model"], 200).ok_or_else(|| "Codex did not return the model identifier.".into())
 }
 
-async fn fast_tier_with(client: &mut impl Transport, model: &str) -> Result<String, String> {
-    let item = model_metadata(client, model).await?;
-    let tier = item["serviceTiers"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|tier| {
-            tier["id"].as_str() == Some("fast")
-                || tier["name"]
-                    .as_str()
-                    .is_some_and(|name| name.eq_ignore_ascii_case("fast"))
-        });
-    tier.and_then(|tier| tier["id"].as_str())
-        .filter(|id| !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control))
-        .map(str::to_owned)
+fn catalog_tiers(item: &Value) -> Vec<ServiceTier> {
+    let text = |value: &Value, limit: usize| {
+        value
+            .as_str()
+            .filter(|s| s.len() <= limit && !s.chars().any(char::is_control))
+            .map(str::to_owned)
+    };
+    let mut tiers: Vec<ServiceTier> = Vec::new();
+    for tier in item["serviceTiers"].as_array().into_iter().flatten().take(32) {
+        let Some(id) = text(&tier["id"], 128).filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        if tiers.iter().any(|t| t.id == id) {
+            continue;
+        }
+        let name = text(&tier["name"], 64)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| id.clone());
+        let description: String = text(&tier["description"], 4096)
+            .unwrap_or_default()
+            .chars()
+            .take(240)
+            .collect();
+        tiers.push(ServiceTier { id, name, description });
+        if tiers.len() == 16 {
+            break;
+        }
+    }
+    tiers
+}
+
+async fn tiers_with(client: &mut impl Transport, model: &str) -> Result<Vec<ServiceTier>, String> {
+    Ok(catalog_tiers(&model_metadata(client, model).await?))
+}
+
+async fn tier_with(client: &mut impl Transport, model: &str, wanted: &str) -> Result<String, String> {
+    let tiers = tiers_with(client, model).await?;
+    // An exact id wins over a name: `fast` is the tier named Fast (id `priority`) unless an id is `fast`.
+    tiers
+        .iter()
+        .find(|tier| tier.id.eq_ignore_ascii_case(wanted))
+        .or_else(|| tiers.iter().find(|tier| tier.name.eq_ignore_ascii_case(wanted)))
+        .map(|tier| tier.id.clone())
         .ok_or_else(|| {
-            "Fast mode is not available for this model in the installed Codex catalog.".into()
+            format!(
+                "{} is not available for this model in the installed Codex catalog.",
+                tier_label(wanted)
+            )
         })
+}
+
+/// "fast" -> "Fast", "ultrafast" -> "Ultrafast".
+pub fn tier_label(wanted: &str) -> String {
+    let mut chars = wanted.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars.flat_map(char::to_lowercase)).collect())
+        .unwrap_or_default()
 }
 
 async fn model_metadata(client: &mut impl Transport, model: &str) -> Result<Value, String> {
@@ -942,19 +1010,37 @@ mod tests {
     }
     #[tokio::test]
     async fn fast_mode_uses_the_selected_models_actual_catalog_tier() {
-        let mut fake = Fake::new(vec![(
-            "model/list",
-            json!({"data":[{"id":"one","model":"model-one","serviceTiers":[{"id":"priority","name":"Fast"}]},{"id":"two","model":"model-two","serviceTiers":[]}],"nextCursor":null}),
-        )]);
+        let catalog = json!({"data":[{"id":"one","model":"model-one","serviceTiers":[{"id":"priority","name":"Fast","description":"2x speed, increased usage"},{"id":"ultrafast","name":"Ultrafast","description":"The fastest available responses."}]},{"id":"two","model":"model-two","serviceTiers":[{"id":"priority","name":"Fast"}]},{"id":"three","model":"model-three","serviceTiers":[]}],"nextCursor":null});
+        let lookup = |model: &'static str, wanted: &'static str| {
+            let catalog = catalog.clone();
+            async move {
+                let mut fake = Fake::new(vec![("model/list", catalog)]);
+                tier_with(&mut fake, model, wanted).await
+            }
+        };
+        // By name or id, any case: Fast is the tier named Fast (id `priority`).
+        assert_eq!(lookup("model-one", "fast").await.unwrap(), "priority");
+        assert_eq!(lookup("model-one", "Priority").await.unwrap(), "priority");
+        assert_eq!(lookup("model-one", "ULTRAFAST").await.unwrap(), "ultrafast");
+        assert_eq!(lookup("model-two", "fast").await.unwrap(), "priority");
         assert_eq!(
-            fast_tier_with(&mut fake, "model-one").await.unwrap(),
-            "priority"
+            lookup("model-two", "ultrafast").await.unwrap_err(),
+            "Ultrafast is not available for this model in the installed Codex catalog."
         );
-        let mut fake = Fake::new(vec![(
-            "model/list",
-            json!({"data":[{"id":"two","model":"model-two","serviceTiers":[]}],"nextCursor":null}),
-        )]);
-        assert!(fast_tier_with(&mut fake, "model-two").await.is_err());
+        assert!(lookup("model-three", "fast").await.is_err());
+        let mut fake = Fake::new(vec![("model/list", catalog.clone())]);
+        let tiers = tiers_with(&mut fake, "model-one").await.unwrap();
+        assert_eq!(
+            tiers.iter().map(|t| (t.id.as_str(), t.name.as_str())).collect::<Vec<_>>(),
+            vec![("priority", "Fast"), ("ultrafast", "Ultrafast")]
+        );
+        assert_eq!(tiers[0].description, "2x speed, increased usage");
+        // Malformed entries are skipped, duplicates kept once, a missing name falls back to the id.
+        let odd = json!({"model":"m","serviceTiers":[{"id":""},{"id":"x"},{"id":"flex"},{"id":"flex","name":"Again"},{"name":"No id"}]});
+        assert_eq!(
+            catalog_tiers(&odd),
+            vec![ServiceTier { id: "flex".into(), name: "flex".into(), description: String::new() }]
+        );
     }
     #[tokio::test]
     async fn imported_transcript_uses_bounded_pages_in_chronological_order() {

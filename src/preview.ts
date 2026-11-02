@@ -696,6 +696,12 @@ const importedPreviewItems = new Set<string>();
 function codexTask(value: unknown): Session {
   const task = session(value); if (task.provider !== 'codex') throw new Error('Use the Codex harness for this command.'); return task;
 }
+/** Sample speed tiers like the Codex catalog's: every model has Fast, GPT-6 Astra and the default model also Ultrafast. */
+function previewServiceTiers(model: string): { id: string; name: string; description: string }[] {
+  const fast = { id: 'priority', name: 'Fast', description: '2x speed, increased usage' };
+  const ultrafast = { id: 'ultrafast', name: 'Ultrafast', description: 'The fastest available responses for latency-sensitive work.' };
+  return model === 'gpt-6-astra' || model === 'default' || !model ? [fast, ultrafast] : [fast];
+}
 function emitGoal(task: Session): void { agent({ sessionId: task.id, kind: 'goal', text: '', data: structuredClone(task.goalState ?? null) }); }
 function runPreviewGoal(task: Session): void {
   window.clearTimeout(timers.get(task.id));
@@ -837,7 +843,7 @@ function slashCatalog(provider: ProviderId) {
     ['side', 'Continue in a separate task', 'fork'],
     ['archive', 'Archive this task', 'archive'], ['delete', 'Delete this task', 'delete'],
     ['export', 'Export this conversation', 'export'], ['worktree', 'Create a worktree task', 'worktree'],
-    ['plan', 'Choose collaboration mode', 'plan'], ['fast', 'Choose service tier', 'fast'],
+    ['plan', 'Choose collaboration mode', 'plan'], ['fast', 'Choose Codex speed', 'fast'],
     ['agents', 'Browse running tasks', 'agents'], ['subagents', 'Browse child agents', 'subagents'],
     ['mention', 'Attach a workspace file', 'mention'], ['cd', 'Change working directory', 'cd'],
     ['init', 'Create project instructions', 'init'], ['recap', 'Summarize this conversation', 'recap'],
@@ -1257,12 +1263,25 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     }
     case 'codex_command': result = commandPanel(codexTask(args.sessionId), args.request ?? {}); break;
     case 'codex_jobs': codexTask(args.sessionId); if (args.stopId) throw new Error('This sample task has no background jobs.'); result = { kind: 'jobs', jobs: [], notes: ['Browser preview · no commands are running.'] }; break;
+    case 'codex_service_tiers': result = previewServiceTiers(codexTask(args.sessionId).model); break;
     case 'set_task_preference': {
       const task = codexTask(args.sessionId), request = args.request ?? {};
-      if (!['plan', 'fast'].includes(request.action) || typeof request.enabled !== 'boolean') throw new Error('Choose a valid task preference.');
       task.codexSettings ??= {};
+      if (request.action === 'serviceTier') {
+        if (request.tier !== null && typeof request.tier !== 'string') throw new Error('Choose a valid task preference.');
+        const wanted = String(request.tier ?? '').trim().toLowerCase();
+        if (!wanted || wanted === 'default') task.codexSettings.serviceTier = null;
+        else {
+          const tiers = previewServiceTiers(task.model);
+          const tier = tiers.find(tier => tier.id.toLowerCase() === wanted) ?? tiers.find(tier => tier.name.toLowerCase() === wanted);
+          if (!tier) throw new Error(`${wanted[0].toUpperCase()}${wanted.slice(1)} is not available for this model in the installed Codex catalog.`);
+          task.codexSettings.serviceTier = tier.id;
+        }
+        task.updatedAt = Date.now(); result = task; break;
+      }
+      if (!['plan', 'fast'].includes(request.action) || typeof request.enabled !== 'boolean') throw new Error('Choose a valid task preference.');
       if (request.action === 'plan') task.codexSettings.collaborationMode = { mode: request.enabled ? 'plan' : 'default' };
-      else task.codexSettings.serviceTier = request.enabled ? 'fast' : null;
+      else task.codexSettings.serviceTier = request.enabled ? 'priority' : null;
       task.updatedAt = Date.now(); result = task; break;
     }
     case 'get_message_content': {

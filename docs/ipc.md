@@ -321,8 +321,12 @@ assistant responses.
 preferences, selected imports, conversation inventory, and plugin operations.
 `codex_jobs(sessionId, stopId?)` lists live background commands or stops one
 verified process belonging to this running task. `set_task_preference` accepts
-only Plan/Fast toggles; the selected model is resolved and Fast availability is
-checked against its current native catalog.
+only Plan toggles, a speed tier (`{action: "serviceTier", tier}`: a tier id or
+name such as `fast` or `ultrafast`, any case, or null for the default) and the
+older Fast toggle (`{action: "fast", enabled}`, still sent by phones); the
+selected model is resolved and the tier is checked against its current native
+catalog, and the catalog id is saved. `codex_service_tiers(sessionId)` lists the
+tiers (`id`, `name`, `description`) the catalog offers for the task's model.
 
 `fork_codex_task(sessionId, remoteId?)` forks the saved Codex conversation or
 adopts a verified conversation in this checkout. Adoption imports bounded history

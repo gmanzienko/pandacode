@@ -2855,6 +2855,35 @@ async function btwSlash(side: Session, text: string, toolbar: HTMLElement | null
   notify(`Open the side thread as a full thread to use ${text.split(/\s/)[0]}.`);
   return true;
 }
+type SpeedTier = { id: string; name: string; description: string };
+/** `/fast` arguments: a tier name (`fast`/`on`, `ultrafast`), null for the default (`off`/`default`), undefined to choose. */
+function fastArgument(argumentsText: string): string | null | undefined {
+  const value = argumentsText.trim().toLowerCase();
+  if (!value) return undefined;
+  if (value === 'on' || value === 'fast') return 'fast';
+  if (value === 'ultrafast') return 'ultrafast';
+  if (value === 'off' || value === 'default') return null;
+  throw new Error('Use /fast, /fast on, /fast ultrafast, or /fast off.');
+}
+/** Sets a Codex task's speed tier (null: the model's default); the native side checks it against the model's catalog. */
+async function setSpeed(task: Session, tier: string | null, name?: string): Promise<void> {
+  const updated = await call<Session>('set_task_preference', { sessionId: task.id, request: { action: 'serviceTier', tier } }); Object.assign(task, updated);
+  const label = tier === null ? 'Default' : name ?? (tier === 'fast' ? 'Fast' : tier === 'ultrafast' ? 'Ultrafast' : tier);
+  notify(`Speed: ${label}`);
+}
+/** Bare `/fast`: Default plus the speed tiers the installed Codex catalog lists for this task's model. */
+async function showSpeedMenu(task: Session): Promise<void> {
+  const tiers = await call<SpeedTier[]>('codex_service_tiers', { sessionId: task.id });
+  const current = task.codexSettings?.serviceTier ?? null;
+  const inPanel = task.id !== state.sessionId;
+  const anchor = (inPanel ? document.querySelector<HTMLElement>('.btw-panel .model-picker') : null)
+    ?? document.querySelector<HTMLElement>('#model-picker-trigger') ?? $('#prompt');
+  const items = [{ id: '', label: 'Default', description: "The model's standard speed", selected: !current },
+    ...tiers.map(tier => ({ id: tier.id, label: tier.name, description: tier.description, selected: current === tier.id }))];
+  await showChoices(anchor, { title: 'Speed', width: 320, items, onSelect: async id => {
+    try { await setSpeed(task, id || null, tiers.find(tier => tier.id === id)?.name); } catch (error) { notify(errorText(error)); }
+  } });
+}
 async function performSlashAction(action: string, argumentsText: string, task: Session): Promise<void> {
   if (action.startsWith('console:')) { await openHarnessConsole(task, `/${action.slice(8)}${argumentsText ? ' ' + argumentsText : ''}`); return; }
   switch (action) {
@@ -2882,14 +2911,19 @@ async function performSlashAction(action: string, argumentsText: string, task: S
       if (!argumentsText) { showOpenProject(); break; }
       const added = await call<Project>('add_project', { path: argumentsText }); if (!state.projects.some(p => p.id === added.id)) state.projects.push(added); await createTask(added.id); break;
     }
-    case 'plan': case 'fast': {
-      if (action === 'fast' && argumentsText && !['on', 'off'].includes(argumentsText)) throw new Error('Use /fast, /fast on, or /fast off.');
+    case 'fast': {
+      const wanted = fastArgument(argumentsText);
+      if (wanted === undefined) { await showSpeedMenu(task); break; }
+      await setSpeed(task, wanted);
+      break;
+    }
+    case 'plan': {
       const settings = task.codexSettings;
-      const current = action === 'plan' ? settings?.collaborationMode?.mode === 'plan' : settings?.serviceTier === 'fast';
-      const enabled = argumentsText === 'off' ? false : argumentsText === 'on' || (action === 'plan' && Boolean(argumentsText)) ? true : !current;
+      const current = settings?.collaborationMode?.mode === 'plan';
+      const enabled = argumentsText === 'off' ? false : argumentsText ? true : !current;
       const updated = await call<Session>('set_task_preference', { sessionId: task.id, request: { action, enabled } }); Object.assign(task, updated);
-      notify(`${action === 'plan' ? 'Plan mode' : 'Fast service tier'} ${enabled ? 'enabled' : 'disabled'}`);
-      if (action === 'plan' && argumentsText && !['on', 'off'].includes(argumentsText)) await instruction(task, argumentsText);
+      notify(`Plan mode ${enabled ? 'enabled' : 'disabled'}`);
+      if (argumentsText && !['on', 'off'].includes(argumentsText)) await instruction(task, argumentsText);
       break;
     }
     case 'init': case 'recap': await instruction(task, slashInstruction(action, argumentsText)); break;
