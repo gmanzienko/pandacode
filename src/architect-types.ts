@@ -6,7 +6,14 @@ export interface WorkerProfile {
   provider: ProviderId;
   model: string;
   reasoningEffort?: string | null;
+  /** Codex workers only: the speed tier the worker starts with; unset is the model's default. */
+  serviceTier?: ServiceTierName | null;
 }
+export type ServiceTierName = 'fast' | 'ultrafast';
+/** The speed choices a Codex worker profile offers ('' is the model's default). */
+export const SERVICE_TIER_CHOICES: readonly { id: '' | ServiceTierName; label: string }[] = [{ id: '', label: 'Default' }, { id: 'fast', label: 'Fast' }, { id: 'ultrafast', label: 'Ultrafast' }];
+/** The `<option>`s of a worker's Speed select. */
+export const speedOptions = (current?: string | null) => SERVICE_TIER_CHOICES.map(choice => `<option value="${choice.id}" ${(current ?? '') === choice.id ? 'selected' : ''}>${choice.label}</option>`).join('');
 export interface TeamConfig {
   /** The task's own model leads and picks each worker's model (from `workers`, a roster of
    * installed models, or as the prompt asks). Configured teams name fixed worker profiles. */

@@ -272,6 +272,8 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
                 provider: pick.provider,
                 model: pick.model,
                 reasoning_effort,
+                // Only a matched roster profile carries a speed tier.
+                service_tier: roster.and_then(|p| p.service_tier.clone()),
             };
             return Ok((profile, note));
         }
@@ -285,6 +287,7 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
             provider: lead.provider.clone(),
             model: lead.model.clone(),
             reasoning_effort: effort(&lead.provider, wanted).or_else(|| lead.reasoning_effort.clone()),
+            service_tier: None,
         }
     } else {
         // The lead's entry, else the first usable one; with none usable, the lead's own model.
@@ -297,6 +300,7 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
                 provider: lead.provider.clone(),
                 model: lead.model.clone(),
                 reasoning_effort: effort(&lead.provider, wanted).or_else(|| lead.reasoning_effort.clone()),
+                service_tier: None,
             },
         }
     };

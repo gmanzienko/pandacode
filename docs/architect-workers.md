@@ -31,6 +31,18 @@ Code, OpenCode, GLM through Claude Code, or Antigravity. Model and effort choice
 custom model IDs remain available. A model must be supported by the selected
 harness and the user's account. PandaCode does not supply inference or API credits.
 
+Codex workers can also have a speed: a **Speed** choice (Default, Fast or
+Ultrafast) sits beside each Codex worker in the classic setup and in named agent
+teams, and is saved on the profile as `serviceTier` (`fast` or `ultrafast`; other
+harnesses refuse it). Just before such a worker first starts, PandaCode looks the
+tier up in the worker model's installed Codex catalog and starts its Codex thread
+with that tier, which it keeps for follow-ups. If the model does not offer the
+tier, or the catalog cannot be read, the worker starts at the default speed and
+the lead sees one short note about it with the worker's result; the assignment
+never fails for it. Workers routed with `profileId: "auto"` or given a provider
+and model directly get a speed only from the matching roster profile, and a
+failover to another harness drops it.
+
 ## Model routing
 
 In an automatic team the lead can set `profileId: "auto"` on an assignment, and
