@@ -140,23 +140,18 @@ pub struct Router {
     onnx: Option<OnnxProfiler>,
 }
 
-/// Codex speed tiers a model slug may name: `<model>@fast`, `<model>@ultrafast`.
-pub const SPEED_TIERS: [&str; 2] = ["fast", "ultrafast"];
-
-/// Splits a `<model>@<tier>` slug into its model and speed tier (any case, returned lowercase).
-/// Anything else, including an unknown tier or an empty model, is a plain model id.
-pub fn split_tier(model: &str) -> (&str, Option<&'static str>) {
-    if let Some((base, suffix)) = model.rsplit_once('@') {
-        if let Some(tier) = SPEED_TIERS.iter().find(|t| t.eq_ignore_ascii_case(suffix)) {
-            if !base.is_empty() {
-                return (base, Some(tier));
-            }
-        }
+/// Splits a `<model>@<tier>` slug at its last `@` into the model and a candidate tier key. Whether
+/// the key names a real tier is decided only against the model's live Codex catalog. Without an
+/// `@`, or with nothing on either side of it, the whole string is the model.
+pub fn split_tier(model: &str) -> (&str, Option<&str>) {
+    match model.rsplit_once('@') {
+        Some((base, key)) if !base.is_empty() && !key.is_empty() => (base, Some(key)),
+        _ => (model, None),
     }
-    (model, None)
 }
 
-/// The model a speed variant runs: Codex slugs drop their tier; any other model is itself.
+/// The model a Codex speed variant runs (its slug before the last `@`). Other harnesses' model IDs
+/// keep any `@`.
 pub fn base_model<'a>(provider: &str, model: &'a str) -> &'a str {
     match split_tier(model) {
         (base, Some(_)) if provider == "codex" => base,
@@ -164,8 +159,8 @@ pub fn base_model<'a>(provider: &str, model: &'a str) -> &'a str {
     }
 }
 
-/// The speed tier of a Codex variant slug.
-pub fn speed_tier(provider: &str, model: &str) -> Option<&'static str> {
+/// The candidate tier key of a Codex variant slug.
+pub fn speed_tier<'a>(provider: &str, model: &'a str) -> Option<&'a str> {
     split_tier(model).1.filter(|_| provider == "codex")
 }
 

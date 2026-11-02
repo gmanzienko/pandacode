@@ -139,27 +139,35 @@ one row per key in pool order, named after its first entry without the trailing
   name list their harnesses (their key when those match too). A ranked model that leaves the set keeps its tier, unshown.
 - When you name models in your message, the lead uses those.
 
-### Codex Fast and Ultrafast
+### Codex speed variants
 
-A Codex speed tier can be named as part of the model: `gpt-6.1-sol@fast` or
-`gpt-6.1-sol@ultrafast`. `split_tier` in `src-tauri/src/panda_router.rs` is the one
-parser; any other suffix is part of the model ID, and other harnesses refuse these
-two. The lead can dispatch `provider: "codex", model: "<model>@ultrafast"`, and a
-roster or named-team entry may use a slug too. The worker runs the plain model, and
-the tier goes through the per-worker speed path in
-[architect-workers.md](architect-workers.md): it is looked up in the model's Codex
-catalog at launch, and a model without it starts at the default speed with a short
-note. When a slug and a profile's `serviceTier` disagree, the slug wins.
+A Codex speed tier can be named as part of the model, as `<model>@<tier>`, for
+example `gpt-6.1-sol@fast`. The tier is any entry of that model's catalog
+`serviceTiers`, named by its key: the catalog name in lower case, with each run of
+spaces and symbols as one `-` (Fast is `fast`, a tier named "Turbo Max" would be
+`turbo-max`). `split_tier` in `src-tauri/src/panda_router.rs` splits a slug at its
+last `@`, and only the live Codex catalog decides whether the part after it is a
+real tier. Other harnesses keep an `@` as part of the model ID. No tier name or
+model is built in, so new models and tiers work without a PandaCode update.
 
-When a team turns on, Codex models whose installed catalog lists Fast or Ultrafast
-(`speedTiers` on the model list) get `<model>@fast` / `<model>@ultrafast` entries in
-the team catalog, after every model, so the 1000-entry cap never drops a model for
-them. Routing never picks a variant on its own: `pool_from` folds each variant
-into its model, so `auto` staffs the plain model unless a roster entry carries a
-tier. `route_models` lists a model's variants beside it as `speedEstCostUsd`, at
-an estimated 2x (Fast) or 3x (Ultrafast) of its cost, since Codex publishes no
-prices. The lead's team rules name the usable variants in one sentence and say
-to use them only when speed matters or you ask for it.
+The lead can dispatch `provider: "codex", model: "<model>@<tier>"`, and a roster or
+named-team entry may use a slug too. The dispatch reads the Codex catalog first and
+refuses a tier the model does not list, or a catalog it cannot read, with the
+reason; no worker is created. The worker runs the plain model, and the tier goes
+through the per-worker speed path in [architect-workers.md](architect-workers.md),
+which checks it again at launch and fails the worker rather than run it at the
+default speed. When a slug and a profile's `serviceTier` disagree, the slug wins.
+
+When a team turns on, every tier each installed Codex model's catalog lists
+(`speedTiers` on the model list, with key, name and description from native) gets
+a `<model>@<tier>` entry in the team catalog, after every model, so the
+1000-entry cap never drops a model for them. Routing never picks a variant on its
+own: `pool_from` folds each variant into its model, so `auto` staffs the plain
+model unless a roster entry carries a tier. `route_models` lists a model's
+variants beside it in `speedVariants`, each at the plain model's cost estimate and
+marked "extra usage, unpriced", because the catalog gives no prices. The lead's
+team rules name the usable variants in one sentence and say to use them only when
+speed matters or you ask for it.
 
 A variant is its model everywhere else. Excluding the model in Settings excludes
 its variants, and a variant slug can also be excluded on its own. Pausing the

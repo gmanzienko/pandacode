@@ -1,7 +1,7 @@
 /* How the Team button behaves, and named agent teams built in Settings. A named team is a
  * saved team profile whose lead may only orchestrate the models it lists (`rosterOnly`). */
-import type { ModelSelection, ServiceTierName, TeamConfig, TeamLibrary, TeamProfile, TeamSetup, WorkerProfile } from './architect-types';
-import type { ProviderId, ProviderModel } from './types';
+import type { ModelSelection, TeamConfig, TeamLibrary, TeamProfile, TeamSetup, WorkerProfile } from './architect-types';
+import type { ProviderId, ProviderModel, SpeedTier } from './types';
 
 const CLASSIC_KEY = 'pandacode.teamClassic';
 export const TEAM_MODE_EVENT = 'pandacode:team-mode';
@@ -17,7 +17,30 @@ export function setClassicTeamSetup(on: boolean): void {
   window.dispatchEvent(new CustomEvent(TEAM_MODE_EVENT, { detail: on }));
 }
 
-export type TeamModel = { provider: ProviderId; harness: string; model: string; name: string; reasoningEffort?: string | null; efforts?: ProviderModel['reasoningEfforts']; serviceTier?: ServiceTierName | null };
+export type TeamModel = { provider: ProviderId; harness: string; model: string; name: string; reasoningEffort?: string | null; efforts?: ProviderModel['reasoningEfforts']; serviceTier?: string | null; speedTiers?: readonly SpeedTier[] };
+
+/** The speed tiers a model's catalog lists, as native reported them (`default` is the harness's default model). */
+export function modelSpeedTiers(providers: readonly { id: ProviderId; models: readonly ProviderModel[] }[], provider: ProviderId, model: string): readonly SpeedTier[] {
+  return providers.find(entry => entry.id === provider)?.models.find(entry => entry.id === (model || 'default'))?.speedTiers ?? [];
+}
+const attr = (text: string) => text.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+/** A Speed select's `<option>`s: Default, then exactly the tiers the model's catalog lists, named and
+ * described as the catalog does. Empty when it lists none (no Speed control). A saved tier the list
+ * lacks stays as an option marked as such until the model's catalog has loaded and the user decides. */
+export function speedOptions(tiers: readonly SpeedTier[], current?: string | null): string {
+  if (!tiers.length && !current) return '';
+  const unknown = current && !tiers.some(tier => tier.key === current) ? [{ key: current, name: `${current} (not in the catalog)`, description: '' }] : [];
+  return [{ key: '', name: 'Default', description: "The model's standard speed" }, ...tiers, ...unknown]
+    .map(tier => `<option value="${attr(tier.key)}" title="${attr(tier.description)}" ${(current ?? '') === tier.key ? 'selected' : ''}>${attr(tier.name)}</option>`).join('');
+}
+/** After a model change: the saved tier if the new model's catalog lists it, else none and a one-line
+ * note naming the dropped tier (as the previous catalog named it). */
+export function keepSpeed(saved: string | null | undefined, tiers: readonly SpeedTier[], model: string, previous: readonly SpeedTier[] = []): { tier: string | null; note: string } {
+  if (!saved) return { tier: null, note: '' };
+  if (tiers.some(tier => tier.key === saved)) return { tier: saved, note: '' };
+  const name = previous.find(tier => tier.key === saved)?.name ?? saved;
+  return { tier: null, note: `${name} is not in ${model || 'this model'}'s catalog, so speed is Default.` };
+}
 export const modelKey = (model: Pick<TeamModel, 'provider' | 'model'>): string => `${model.provider}:${model.model}`;
 
 /** A roster entry ID the native validator accepts: ASCII letters, digits, `_` and `-`. */
