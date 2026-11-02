@@ -405,9 +405,9 @@ fn builtins_for_platform(platform: &str) -> Vec<SlashCommand> {
         ),
         (
             "fast",
-            "Choose Codex speed: Default, Fast or Ultrafast",
+            "Choose Codex speed from the model's catalog",
             "fast",
-            Some("[on|ultrafast|off]"),
+            Some("[on|<tier>|off]"),
         ),
         ("agents", "Browse running tasks", "agents", None),
         (
@@ -766,11 +766,11 @@ mod tests {
             let command = commands.iter().find(|entry| entry.name == name).unwrap();
             assert!(matches!(&command.invocation, Invocation::Action(value) if value == action));
         }
-        // /fast picks Default, Fast or Ultrafast from the model's catalog.
+        // /fast picks Default or any tier the model's catalog lists.
         let fast = commands.iter().find(|entry| entry.name == "/fast").unwrap();
         assert!(matches!(&fast.invocation, Invocation::Action(value) if value == "fast"));
-        assert_eq!(fast.argument_hint.as_deref(), Some("[on|ultrafast|off]"));
-        assert!(fast.description.contains("Ultrafast"));
+        assert_eq!(fast.argument_hint.as_deref(), Some("[on|<tier>|off]"));
+        assert!(fast.description.contains("catalog"));
         let ids: HashSet<_> = commands.iter().map(|command| &command.id).collect();
         let names: HashSet<_> = commands.iter().map(|command| &command.name).collect();
         assert_eq!(ids.len(), commands.len());

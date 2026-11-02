@@ -3315,7 +3315,6 @@ mod tests {
             resume_prompt: None,
             tool_catalog_version: 0,
             service_tier: None,
-            launch_note: None,
         }
     }
 

@@ -188,10 +188,12 @@ test('goal workflow prevents a competing harness console while the goal is runni
 });
 
 test('goal workflow honors command arguments and rejects invalid fast settings without losing the draft', async ({ page }) => {
+  // Any tier key goes to the model's catalog, which refuses one it does not list.
   await command(page, '/fast turbo');
-  await expect(page.locator('#toast')).toContainText('Use /fast, /fast on, /fast ultrafast, or /fast off.');
+  await expect(page.locator('#toast')).toContainText('Turbo is not available for default in the installed Codex catalog.');
   await expect(page.locator('#prompt')).toHaveValue('/fast turbo ');
-  expect(await calls(page, 'set_task_preference')).toHaveLength(0);
+  expect((await calls(page, 'set_task_preference')).map((entry: any) => entry.args.request)).toEqual([{ action: 'serviceTier', tier: 'turbo' }]);
+  expect((await page.evaluate(() => (window as any).__goalTask('session-2'))).codexSettings?.serviceTier ?? null).toBeNull();
   await command(page, '/worktree feature/game');
   await expect(page.getByRole('textbox', { name: 'Branch name', exact: true })).toHaveValue('feature/game');
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();

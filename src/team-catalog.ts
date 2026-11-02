@@ -18,12 +18,10 @@ export const CATALOG_MAX = 1000;
 export const ROSTER_MAX = 24, ROSTER_PER_HARNESS = 6;
 export interface CatalogHarness { id: ProviderId; name: string; models: readonly Pick<ProviderModel, 'id' | 'name' | 'speedTiers'>[] }
 
-/** Codex speed tiers teams offer as `<model>@<tier>` slugs (never picked by routing on its own). */
-const SPEED_TIERS: Record<string, string> = { fast: 'Fast', ultrafast: 'Ultrafast' };
-
 /** Every model of every harness (deduped by provider + model), ordered round-robin across
- * harnesses so the cap never drops a harness entirely, then each Codex model's speed variants
- * (`<model>@fast`, `<model>@ultrafast`) while room remains. `roster` is the short list the lead sees:
+ * harnesses so the cap never drops a harness entirely, then a `<model>@<key>` variant for every
+ * speed tier each Codex model's catalog lists (key and name as native reports them; routing never
+ * picks one on its own) while room remains. `roster` is the short list the lead sees:
  * the first few models of each harness, with the same ids as the catalog. */
 export function buildTeamCatalog(harnesses: readonly CatalogHarness[]): { roster: WorkerProfile[]; catalog: WorkerProfile[] } {
   const seen = new Set<string>(), taken = new Set<string>();
@@ -56,8 +54,8 @@ export function buildTeamCatalog(harnesses: readonly CatalogHarness[]): { roster
     for (const model of lists[index]) {
       if (model.id === 'default' || model.id.includes('@') || !profiles.has(`${harness.id}\u0000${model.id}`)) continue;
       for (const tier of model.speedTiers ?? []) {
-        const label = SPEED_TIERS[tier];
-        if (label && catalog.length < CATALOG_MAX && !profiles.has(`${harness.id}\u0000${model.id}@${tier}`)) add(harness, `${model.id}@${tier}`, `${model.name} ${label}`);
+        const slug = `${model.id}@${tier.key}`;
+        if (tier.key && catalog.length < CATALOG_MAX && !profiles.has(`${harness.id}\u0000${slug}`)) add(harness, slug, `${model.name} ${tier.name}`);
       }
     }
   });

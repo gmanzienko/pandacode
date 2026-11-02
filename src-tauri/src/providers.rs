@@ -527,20 +527,10 @@ pub struct ModelInfo {
     pub reasoning_efforts: Vec<ReasoningEffortInfo>,
     pub default_reasoning_effort: Option<String>,
     pub context_window: Option<u64>,
-    /// Codex only: the speed tiers (`fast`, `ultrafast`) its catalog lists, which teams offer as
-    /// `<model>@fast` / `<model>@ultrafast` variants.
+    /// Codex only: every speed tier its catalog lists (key, name and description as the catalog
+    /// gives them), offered to teams as `<model>@<key>` variants and in the Speed choices.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub speed_tiers: Vec<String>,
-}
-
-/// The speed tiers (`fast`, `ultrafast`) a Codex catalog entry offers, by tier id or name (Fast is id `priority`).
-fn codex_speed_tiers(entry: &Value) -> Vec<String> {
-    let tiers = crate::command_operations::catalog_tiers(entry);
-    crate::panda_router::SPEED_TIERS
-        .iter()
-        .filter(|wanted| tiers.iter().any(|t| t.id.eq_ignore_ascii_case(wanted) || t.name.eq_ignore_ascii_case(wanted)))
-        .map(|t| t.to_string())
-        .collect()
+    pub speed_tiers: Vec<crate::command_operations::ServiceTier>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -1017,6 +1007,10 @@ fn parse_codex_models(result: &Value) -> Result<Vec<ModelInfo>, String> {
         if entry["hidden"] == true {
             continue;
         }
+        // `default` runs the catalog's default model, so it offers that model's speed tiers.
+        if entry["isDefault"] == true {
+            models[0].speed_tiers = crate::command_operations::catalog_tiers(entry);
+        }
         let model = entry["model"].as_str().or_else(|| entry["id"].as_str());
         if let Some(model) = model.filter(|model| valid_model_id(model)) {
             if !models.iter().any(|m| m.id == model) {
@@ -1044,7 +1038,7 @@ fn parse_codex_models(result: &Value) -> Result<Vec<ModelInfo>, String> {
                     .filter(|id| efforts.iter().any(|effort| effort.id == *id))
                     .map(str::to_owned);
                 models.push(ModelInfo {
-                    speed_tiers: codex_speed_tiers(entry),
+                    speed_tiers: crate::command_operations::catalog_tiers(entry),
                     id: model.into(),
                     name: model_text(
                         entry["displayName"]
@@ -4888,18 +4882,18 @@ mod tests {
     }
 
     #[test]
-    fn model_catalog_lists_the_speed_tiers_teams_offer_as_variants() {
+    fn model_catalog_lists_every_speed_tier_with_its_key() {
         let models = parse_codex_models(&json!({"data":[
-            {"model":"sol","serviceTiers":[{"id":"priority","name":"Fast"},{"id":"ultrafast","name":"Ultrafast"},{"id":"flex","name":"Flex"}]},
+            {"model":"sol","isDefault":true,"serviceTiers":[{"id":"priority","name":"Fast","description":"2x speed"},{"id":"turbo","name":"Turbo Max","description":"Fictional."}]},
             {"model":"luna","serviceTiers":[{"id":"priority","name":"Fast"}]},
             {"model":"plain","serviceTiers":[]},
             {"model":"old"}
         ]}))
         .unwrap();
-        let tiers: Vec<(&str, Vec<&str>)> = models.iter().map(|m| (m.id.as_str(), m.speed_tiers.iter().map(String::as_str).collect())).collect();
-        assert_eq!(tiers, [("default", vec![]), ("sol", vec!["fast", "ultrafast"]), ("luna", vec!["fast"]), ("plain", vec![]), ("old", vec![])]);
+        let tiers: Vec<(&str, Vec<(&str, &str)>)> = models.iter().map(|m| (m.id.as_str(), m.speed_tiers.iter().map(|t| (t.key.as_str(), t.name.as_str())).collect())).collect();
+        assert_eq!(tiers, [("default", vec![("fast", "Fast"), ("turbo-max", "Turbo Max")]), ("sol", vec![("fast", "Fast"), ("turbo-max", "Turbo Max")]), ("luna", vec![("fast", "Fast")]), ("plain", vec![]), ("old", vec![])]);
         // Sent to the window only when there are any.
-        assert_eq!(serde_json::to_value(&models[1]).unwrap()["speedTiers"], json!(["fast", "ultrafast"]));
+        assert_eq!(serde_json::to_value(&models[1]).unwrap()["speedTiers"][1], json!({"id":"turbo","key":"turbo-max","name":"Turbo Max","description":"Fictional."}));
         assert!(serde_json::to_value(&models[3]).unwrap().get("speedTiers").is_none());
     }
 

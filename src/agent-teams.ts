@@ -1,11 +1,11 @@
 /* Settings → Agents: the classic Team setup switch and named agent teams. A team is a name,
  * the models it may orchestrate and the one that leads; it appears in the model picker. */
 import './agent-teams.css';
-import { speedOptions, type ServiceTierName, type TeamLibrary, type TeamProfile } from './architect-types';
+import type { TeamLibrary, TeamProfile } from './architect-types';
 import { escape, icon } from './dom';
 import { modelChoices } from './model-catalog';
 import { providerLogo } from './provider-logos';
-import { classicTeamSetup, modelKey, namedTeams, namedTeamSetup, setClassicTeamSetup, teamDetail, TEAM_MODELS_MAX, type TeamModel } from './team-mode';
+import { classicTeamSetup, keepSpeed, modelKey, namedTeams, namedTeamSetup, setClassicTeamSetup, speedOptions, teamDetail, TEAM_MODELS_MAX, type TeamModel } from './team-mode';
 import type { Provider, ProviderId, ProviderModel } from './types';
 
 export interface AgentTeamsOptions {
@@ -70,7 +70,7 @@ export function mountAgentTeams(host: HTMLElement, options: AgentTeamsOptions): 
     return installed.flatMap((provider, index) => {
       const result = loaded[index];
       return modelChoices(provider.id, result.status === 'fulfilled' ? result.value : provider.models)
-        .map(model => ({ provider: provider.id, harness: provider.name, model: model.id, name: model.name, efforts: model.reasoningEfforts }));
+        .map(model => ({ provider: provider.id, harness: provider.name, model: model.id, name: model.name, efforts: model.reasoningEfforts, speedTiers: model.speedTiers ?? [] }));
     });
   }
   /** Effort choices for a model that advertises them; empty means the harness default. */
@@ -86,9 +86,13 @@ export function mountAgentTeams(host: HTMLElement, options: AgentTeamsOptions): 
     models.innerHTML = groups.map(provider => `<section aria-label="${escape(harnessName(provider))}"><h4>${providerLogo(provider)}${escape(harnessName(provider))}</h4>${all.filter(model => model.provider === provider).map(model => {
       const key = modelKey(model), label = `${model.name} · ${model.harness}`;
       const effort = model.efforts?.length ? `<select class="agent-team-effort" aria-label="Worker effort for ${escape(label)}">${effortOptions(model, saved.find(worker => modelKey(worker) === key)?.reasoningEffort)}</select>` : '';
-      // Codex workers can start at a faster tier; one the model lacks starts at its default speed.
-      const speed = model.provider === 'codex' ? `<select class="agent-team-effort agent-team-speed" aria-label="Worker speed for ${escape(label)}">${speedOptions(saved.find(worker => modelKey(worker) === key)?.serviceTier)}</select>` : '';
-      return `<div class="agent-team-model" data-key="${escape(key)}" data-search="${escape(`${label} ${model.model}`.toLowerCase())}"><label><input type="checkbox" value="${escape(key)}" aria-label="Include ${escape(label)}" ${chosen.has(key) ? 'checked' : ''}><span>${escape(model.name)}</span></label><label class="agent-team-lead"><input type="radio" name="agent-team-lead" value="${escape(key)}" aria-label="${escape(label)} leads" ${key === lead ? 'checked' : ''}><span>Lead</span></label>${effort}${speed}</div>`;
+      // Speed choices are exactly the tiers this model's catalog lists; a saved tier it no longer
+      // lists is dropped here, and the row says so.
+      const kept = keepSpeed(saved.find(worker => modelKey(worker) === key)?.serviceTier, model.speedTiers ?? [], model.name);
+      const options = speedOptions(model.speedTiers ?? [], kept.tier);
+      const speed = options ? `<select class="agent-team-effort agent-team-speed" aria-label="Worker speed for ${escape(label)}">${options}</select>` : '';
+      const note = kept.note ? `<small class="agent-team-speed-note" data-live>${escape(kept.note)}</small>` : '';
+      return `<div class="agent-team-model" data-key="${escape(key)}" data-search="${escape(`${label} ${model.model}`.toLowerCase())}"><label><input type="checkbox" value="${escape(key)}" aria-label="Include ${escape(label)}" ${chosen.has(key) ? 'checked' : ''}><span>${escape(model.name)}</span></label><label class="agent-team-lead"><input type="radio" name="agent-team-lead" value="${escape(key)}" aria-label="${escape(label)} leads" ${key === lead ? 'checked' : ''}><span>Lead</span></label>${effort}${speed}${note}</div>`;
     }).join('')}</section>`).join('');
     shown = all;
     leadSelected = lead;
@@ -140,7 +144,7 @@ export function mountAgentTeams(host: HTMLElement, options: AgentTeamsOptions): 
       const row = box.closest('.agent-team-model');
       const effort = row?.querySelector<HTMLSelectElement>('.agent-team-effort:not(.agent-team-speed)');
       const speed = row?.querySelector<HTMLSelectElement>('.agent-team-speed');
-      return model && { ...model, reasoningEffort: effort ? effort.value || null : model.reasoningEffort ?? null, serviceTier: speed ? (speed.value as ServiceTierName) || null : null };
+      return model && { ...model, reasoningEffort: effort ? effort.value || null : model.reasoningEffort ?? null, serviceTier: speed ? speed.value || null : null };
     }).filter((model): model is TeamModel => Boolean(model));
     const leadKey = models.querySelector<HTMLInputElement>('input[type=radio]:checked')?.value;
     const leadModel = included.find(model => modelKey(model) === leadKey);

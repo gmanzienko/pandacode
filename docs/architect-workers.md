@@ -31,19 +31,29 @@ Code, OpenCode, GLM through Claude Code, or Antigravity. Model and effort choice
 custom model IDs remain available. A model must be supported by the selected
 harness and the user's account. PandaCode does not supply inference or API credits.
 
-Codex workers can also have a speed: a **Speed** choice (Default, Fast or
-Ultrafast) sits beside each Codex worker in the classic setup and in named agent
-teams, and is saved on the profile as `serviceTier` (`fast` or `ultrafast`; other
-harnesses refuse it). Just before such a worker first starts, PandaCode looks the
-tier up in the worker model's installed Codex catalog and starts its Codex thread
-with that tier, which it keeps for follow-ups. If the model does not offer the
-tier, or the catalog cannot be read, the worker starts at the default speed and
-the lead sees one short note about it with the worker's result; the assignment
-never fails for it. Workers routed with `profileId: "auto"` or given a provider
-and model directly get a speed only from the matching roster profile or from a
-`<model>@fast` / `<model>@ultrafast` model slug (see
-[model-routing.md](model-routing.md#codex-fast-and-ultrafast)), and a failover to
-another harness drops it.
+Codex workers can also have a speed. A **Speed** choice sits beside each Codex
+worker in the classic setup and in named agent teams. It lists Default and exactly
+the tiers the selected model's installed Codex catalog reports, with the catalog's
+names and descriptions, and it is hidden for a model that reports none. When you
+pick another model, a saved tier the new model lacks is dropped and the row says
+so in one line. The profile saves the tier's key as `serviceTier` (the catalog name
+in lower case with spaces and symbols as `-`, such as `fast`); other harnesses
+refuse it. No tier name or model is built into PandaCode, so new models and new
+tiers work as soon as the Codex catalog lists them.
+
+A requested speed is never replaced by the default one. Saving a profile checks
+its tier against the live Codex catalog for that model and refuses it with the
+reason, for example "Ultrafast is not available for gpt-6-luna in the installed
+Codex catalog.", or says the catalog could not be read. A dispatch is checked the
+same way before any worker is created. Just before the worker first starts, the
+tier is looked up again and its catalog id starts the Codex thread, which keeps it
+for follow-ups. If the catalog no longer lists the tier, or cannot be read, the
+worker fails with that reason and the lead decides what to do. Workers routed with
+`profileId: "auto"` or given a provider and model directly get a speed only from
+the matching roster profile or from a `<model>@<tier>` model slug (see
+[model-routing.md](model-routing.md#codex-speed-variants)). A worker with a speed
+tier never fails over to another harness, since only Codex runs the tier; it stays
+failed and its error says why.
 
 ## Model routing
 

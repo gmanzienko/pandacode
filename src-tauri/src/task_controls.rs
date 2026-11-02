@@ -230,7 +230,8 @@ pub(super) enum TaskPreference {
     Plan { enabled: bool },
     /// Older callers (phones, remote hosts): Fast on or off.
     Fast { enabled: bool },
-    /// A speed tier by catalog id or name (`fast`, `ultrafast`), any case; null is the model's default.
+    /// A speed tier key from the model's catalog (its name, any case or spacing; `fast` is the tier
+    /// named Fast), checked against the live catalog; null is the model's default.
     ServiceTier { tier: Option<String> },
 }
 /// The speed tiers the installed Codex catalog lists for this task's model.

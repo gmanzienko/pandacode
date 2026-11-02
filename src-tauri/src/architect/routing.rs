@@ -384,26 +384,24 @@ pub(super) fn speed_note(config: &TeamConfig) -> String {
     }
     let more = if slugs.len() > 8 { ", …" } else { "" };
     slugs.truncate(8);
-    format!(" Codex speed variants (provider codex, model <model>@fast or @ultrafast: faster, 2-3x usage; routing never picks them, so name one only when speed matters or the user asks): {}{more}", slugs.join(", "))
+    format!(" Codex speed variants from its catalog (provider codex, model <model>@<tier>: faster, extra usage, unpriced; routing never picks them, so name one only when speed matters or the user asks): {}{more}", slugs.join(", "))
 }
 
-/// Usage multiplier of a Codex speed tier over the default speed (est.: Codex lists no prices).
-pub(super) fn speed_cost(tier: &str) -> f64 {
-    if tier == "ultrafast" { 3.0 } else { 2.0 }
-}
+/// How route_models marks a speed variant's cost: the Codex catalog prices no tier.
+pub(super) const UNPRICED: &str = "extra usage, unpriced";
 
-/// The usable Codex speed variants (`<model>@fast`, …) the team's models list for a model: slug and tier.
-pub(super) fn speed_variants(config: &TeamConfig, provider: &str, model: &str) -> Vec<(String, &'static str)> {
+/// The usable Codex speed variants (`<model>@<tier>` slugs) the team's models list for a model.
+pub(super) fn speed_variants(config: &TeamConfig, provider: &str, model: &str) -> Vec<String> {
     if provider != "codex" {
         return Vec::new();
     }
-    let mut out: Vec<(String, &'static str)> = Vec::new();
+    let mut out: Vec<String> = Vec::new();
     // A named team offers only its own entries.
     let catalog = if config.roster_only { &[][..] } else { &config.catalog[..] };
     for p in config.workers.iter().chain(catalog).filter(|p| p.provider == provider) {
-        if let (base, Some(tier)) = super::split_tier(&p.model) {
-            if base == model && usable(p) && !out.iter().any(|(_, t)| *t == tier) {
-                out.push((format!("{base}@{tier}"), tier));
+        if let (base, Some(_)) = super::split_tier(&p.model) {
+            if base == model && usable(p) && !out.contains(&p.model) {
+                out.push(p.model.clone());
             }
         }
     }
@@ -420,13 +418,14 @@ pub(super) fn route_summary(config: &TeamConfig, routes: &[Route]) -> Value {
         if let Some(p) = config.workers.iter().find(|p| p.provider == m.provider && p.model == m.model) {
             entry["profileId"] = json!(p.id);
         }
-        // Speed variants the lead may name (routing never picks them): the model's own P, faster, more usage.
-        let speeds: serde_json::Map<String, Value> = speed_variants(config, &m.provider, &m.model)
+        // Speed variants the lead may name (routing never picks them): the model's own P and cost
+        // estimate, faster, with extra usage the catalog does not price.
+        let speeds: Vec<Value> = speed_variants(config, &m.provider, &m.model)
             .into_iter()
-            .map(|(slug, tier)| (slug, json!(usd(m.est_cost_usd * speed_cost(tier)))))
+            .map(|slug| json!({"model":slug,"estCostUsd":usd(m.est_cost_usd),"cost":UNPRICED}))
             .collect();
         if !speeds.is_empty() {
-            entry["speedEstCostUsd"] = Value::Object(speeds);
+            entry["speedVariants"] = Value::Array(speeds);
         }
         if let Some(tier) = m.tier {
             entry["tier"] = json!(tier);
