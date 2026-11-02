@@ -5400,3 +5400,56 @@ fn routing_off_keeps_the_lead_models_roster_tier() {
     let error = with_speeds(speeds(), || routed_call(&state, &sid, json!({"assignments":[auto_assignment("off2", json!({"profileId":"auto"}))]}), false)).unwrap_err();
     assert_eq!(error, "Ultrafast is not available for gpt-6-luna in the installed Codex catalog.");
 }
+
+fn replacement_with_fast_roster() -> (AppState, String, String) {
+    let (state, sid, id) = replacement_state();
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute("UPDATE sessions SET provider='codex', model='gpt-5.6-terra', reasoning_effort=NULL WHERE id=?1", [&sid]).unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        let mut roster = profile("terra-fast", "codex", "gpt-5.6-terra", "Terra Fast");
+        roster.service_tier = Some("fast".into());
+        team.config.workers.push(roster.clone());
+        team.config.catalog = vec![roster];
+        save(&store, &mut team).unwrap();
+    }
+    (state, sid, id)
+}
+fn check_fast_roster_dispatch(extra: Value, replace: bool, routed: bool, expected: &str, catalog_id: &str) {
+    let (state, sid, id) = replacement_with_fast_roster();
+    let mut assignment = auto_assignment("replacement", extra);
+    if replace {
+        assignment["replaces"] = json!(id);
+    }
+    let speeds = replacement_speeds();
+    with_speeds(speeds.clone(), || routed_call(&state, &sid, json!({"assignments":[assignment]}), routed)).unwrap();
+    let store = state.store.lock().unwrap();
+    let team = load(&store, &sid).unwrap().unwrap();
+    let worker = team.workers.last().unwrap();
+    assert_eq!((worker.model.as_str(), worker.service_tier.as_deref()), ("gpt-5.6-terra", Some(expected)));
+    let tiers = Ok(speeds.unwrap().unwrap().remove(&worker.model).unwrap());
+    apply_speed(&store, &worker.session_id, &worker.model, expected, tiers).unwrap();
+    assert_eq!(store.session(&worker.session_id).unwrap().codex_settings, Some(json!({"serviceTier":catalog_id})));
+}
+#[test]
+fn an_auto_replacement_overrides_an_implicit_roster_tier() {
+    check_fast_roster_dispatch(json!({"profileId":"auto"}), true, true, "ultrafast", "ultrafast");
+}
+#[test]
+fn an_unrouted_replacement_overrides_an_implicit_roster_tier() {
+    for extra in [json!({"profileId":"auto"}), json!({})] {
+        check_fast_roster_dispatch(extra, true, false, "ultrafast", "ultrafast");
+    }
+}
+#[test]
+fn a_replacement_keeps_an_explicit_slug_tier_over_the_inherited_tier() {
+    check_fast_roster_dispatch(json!({"provider":"codex","model":"gpt-5.6-terra@fast"}), true, true, "fast", "priority");
+}
+#[test]
+fn a_replacement_keeps_an_explicit_profile_tier_over_the_inherited_tier() {
+    check_fast_roster_dispatch(json!({"profileId":"terra-fast"}), true, true, "fast", "priority");
+}
+#[test]
+fn a_fresh_auto_dispatch_keeps_an_implicit_roster_tier() {
+    check_fast_roster_dispatch(json!({"profileId":"auto"}), false, true, "fast", "priority");
+}
