@@ -33,16 +33,33 @@ test('the Speed select lists Default plus exactly the tiers the model\'s catalog
   // The catalog's description is the option's title, escaped; the saved tier is selected.
   const html = speedOptions(modelSpeedTiers(providers, 'codex', 'nova-9'), 'turbo-max');
   assert.match(html, /value="turbo-max" title="Fictional &#34;max&#34; &#38; &#60;fast&#62;\." selected/);
-  // A saved tier the (not yet loaded) list lacks is shown as such, never silently replaced.
-  assert.deepEqual(labels(speedOptions([], 'fast')), [['', 'Default'], ['fast', 'fast (not in the catalog)']]);
+  // Never an option the catalog lacks: a stale saved tier selects Default, and no tiers means no control.
+  assert.deepEqual(labels(speedOptions(modelSpeedTiers(providers, 'codex', 'gpt-6-luna'), 'ultrafast')), [['', 'Default'], ['fast', 'Fast']]);
+  assert.match(speedOptions(modelSpeedTiers(providers, 'codex', 'gpt-6-luna'), 'ultrafast'), /value="" title="[^"]*" selected/);
+  assert.equal(speedOptions([], 'fast'), '');
+  assert.equal(speedOptions(modelSpeedTiers(providers, 'codex', 'gpt-5.6-sol'), 'ultrafast'), '');
+});
+
+test('after a live catalog load, a stale saved tier leaves the selection and shows only in the note', () => {
+  // As the classic setup does once a harness's live catalog arrives (no earlier names known).
+  const tiers = modelSpeedTiers(providers, 'codex', 'gpt-6-luna');
+  const kept = keepSpeed('ultrafast', tiers, 'gpt-6-luna');
+  assert.deepEqual(kept, { tier: null, note: 'Ultrafast is not available for gpt-6-luna; this worker will use the default speed only if you save it that way.' });
+  const html = speedOptions(tiers, kept.tier);
+  assert.ok(!html.includes('ultrafast') && !html.includes('not in the catalog'), html);
+  // A model whose catalog lists no tiers hides Speed entirely, and its stale tier is noted too.
+  const none = keepSpeed('fast', modelSpeedTiers(providers, 'codex', 'gpt-5.6-sol'), 'gpt-5.6-sol');
+  assert.equal(none.tier, null);
+  assert.equal(speedOptions(modelSpeedTiers(providers, 'codex', 'gpt-5.6-sol'), none.tier), '');
 });
 
 test('changing the model drops a tier the new model lacks, with a one-line note', () => {
   const tiers = model => modelSpeedTiers(providers, 'codex', model);
   assert.deepEqual(keepSpeed('fast', tiers('gpt-6-luna'), 'gpt-6-luna', tiers('gpt-6.1-sol')), { tier: 'fast', note: '' });
-  assert.deepEqual(keepSpeed('ultrafast', tiers('gpt-6-luna'), 'gpt-6-luna', tiers('gpt-6.1-sol')), { tier: null, note: "Ultrafast is not in gpt-6-luna's catalog, so speed is Default." });
-  assert.deepEqual(keepSpeed('turbo-max', tiers('gpt-5.6-sol'), 'gpt-5.6-sol', tiers('nova-9')), { tier: null, note: "Turbo Max is not in gpt-5.6-sol's catalog, so speed is Default." });
-  assert.deepEqual(keepSpeed('fast', [], 'opus'), { tier: null, note: "fast is not in opus's catalog, so speed is Default." });
+  const later = ' this worker will use the default speed only if you save it that way.';
+  assert.deepEqual(keepSpeed('ultrafast', tiers('gpt-6-luna'), 'gpt-6-luna', tiers('gpt-6.1-sol')), { tier: null, note: `Ultrafast is not available for gpt-6-luna;${later}` });
+  assert.deepEqual(keepSpeed('turbo-max', tiers('gpt-5.6-sol'), 'gpt-5.6-sol', tiers('nova-9')), { tier: null, note: `Turbo Max is not available for gpt-5.6-sol;${later}` });
+  assert.deepEqual(keepSpeed('fast', [], 'opus'), { tier: null, note: `Fast is not available for opus;${later}` });
   assert.deepEqual(keepSpeed(null, [], 'opus'), { tier: null, note: '' });
 });
 
