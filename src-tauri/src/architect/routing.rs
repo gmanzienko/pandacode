@@ -294,7 +294,7 @@ pub(super) fn usable(profile: &WorkerProfile) -> bool {
 /// team without the lead's usable model uses its first usable entry, else the lead's own model), and says which in one line. A fresh assignment
 /// in Cheap or Balanced mode opens on the ladder's first (cheapest safe) rung and escalates from there;
 /// Best mode and escalations take the policy's pick.
-pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &Assignment, routes: &AutoRoutes) -> Result<(WorkerProfile, String)> {
+pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &Assignment, routes: &AutoRoutes) -> Result<(WorkerProfile, super::TierOrigin, String)> {
     if assignment.provider.is_some() || assignment.model.is_some() {
         return Err("Use either profileId or provider and model, not both.".into());
     }
@@ -340,7 +340,7 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
                 // Only a matched roster profile carries a speed tier: routing never picks one itself.
                 service_tier: roster.and_then(profile_tier),
             };
-            return Ok((profile, note));
+            return Ok((profile, super::TierOrigin::Implicit, note));
         }
         Ok(_) => "no rated model fits",
         Err(reason) => reason,
@@ -372,7 +372,7 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
         }
     };
     let note = format!("not routed ({reason}), using {} · {}", profile.name, profile.provider);
-    Ok((profile, note))
+    Ok((profile, super::TierOrigin::Implicit, note))
 }
 
 #[derive(Deserialize)]

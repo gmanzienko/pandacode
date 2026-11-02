@@ -136,6 +136,10 @@ fn inherit_speed(mut profile: WorkerProfile, old: &str, tier: &str, speeds: &Spe
     if profile.provider != "codex" {
         return Err(format!("{old} ran at the {label} speed tier, so its replacement must too, and only Codex runs it; {} via {} cannot. Name a Codex model whose catalog lists {label}.", profile.model, profile.provider));
     }
+    // An implicitly matched roster slug must not override the inherited tier during resolution.
+    if !speeds.as_ref().and_then(|s| s.as_ref().ok()).is_some_and(|c| c.contains_key(&profile.model)) {
+        profile.model = split_tier(&profile.model).0.to_string();
+    }
     profile.service_tier = Some(tier.to_string());
     resolve_speed(profile, speeds).map_err(|e| format!("{old} ran at the {label} speed tier, so its replacement must too: {e}"))
 }
@@ -1550,10 +1554,14 @@ fn summaries(team: &TeamSnapshot, offset: usize, owner: Option<&str>) -> Value {
     let next = offset + workers.len();
     json!({"status":team.status,"round":team.round,"maxRounds":team.config.max_rounds,"nextOffset":if next<visible{Some(next)}else{None},"workers":workers})
 }
+enum TierOrigin {
+    Explicit,
+    Implicit,
+}
 /// The worker model for one assignment. Configured teams must name a profile. Auto
 /// teams may name a roster profile, a provider and model chosen by the lead (or asked
 /// for in the user's prompt), or nothing, which reuses the lead's own selection.
-fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &Assignment) -> Result<WorkerProfile> {
+fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &Assignment) -> Result<(WorkerProfile, TierOrigin)> {
     let direct = assignment.provider.is_some() || assignment.model.is_some() || assignment.reasoning_effort.is_some();
     if let Some(id) = &assignment.profile_id {
         if direct {
@@ -1563,13 +1571,15 @@ fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &Assignment) 
         if !routing::usable(profile) {
             return Err(format!("{} is switched off or paused. Use profileId \"auto\" or omit it.", profile.name));
         }
-        return Ok(profile.clone());
+        let origin = if routing::profile_tier(profile).is_some() { TierOrigin::Explicit } else { TierOrigin::Implicit };
+        return Ok((profile.clone(), origin));
     }
     if !config.auto {
         return Err("Choose a worker profile with profileId.".into());
     }
+    let origin = if assignment.model.as_deref().is_some_and(|m| crate::panda_router::speed_tier(assignment.provider.as_deref().unwrap_or_default(), m).is_some()) { TierOrigin::Explicit } else { TierOrigin::Implicit };
     if config.roster_only {
-        return staff_from_roster(config, lead, assignment);
+        return staff_from_roster(config, lead, assignment).map(|profile| (profile, origin));
     }
     let (provider, model) = match (&assignment.provider, &assignment.model) {
         (Some(provider), Some(model)) => (provider.clone(), model.clone()),
@@ -1592,14 +1602,14 @@ fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &Assignment) 
     crate::providers::validate_reasoning_effort(&provider, reasoning_effort.as_deref())?;
     // A roster entry keeps its display name and speed tier; anything else is named after its model.
     let roster = routing::roster_entry(config, &provider, &model);
-    Ok(WorkerProfile {
+    Ok((WorkerProfile {
         id: "auto".into(),
         name: roster.map_or_else(|| model.clone(), |p| p.name.clone()),
         service_tier: roster.and_then(routing::profile_tier),
         provider,
         model,
         reasoning_effort,
-    })
+    }, origin))
 }
 /// Named agent teams orchestrate only their listed models. Omitting the model uses the
 /// lead's own entry when the team lists it.
@@ -1827,19 +1837,18 @@ fn dispatch_as(
                 }
                 // While routing is on, an assignment that names no model is routed too (`routes` has its key).
                 let unchosen = assignment.profile_id.is_none() && assignment.provider.is_none() && assignment.model.is_none();
-                let profile = if assignment.profile_id.as_deref() == Some(routing::AUTO) || (unchosen && routes.contains_key(&assignment.key)) {
-                    let (profile, note) = routing::staff(&team.config, &parent, &assignment, routes)?;
+                let (profile, tier_origin) = if assignment.profile_id.as_deref() == Some(routing::AUTO) || (unchosen && routes.contains_key(&assignment.key)) {
+                    let (profile, origin, note) = routing::staff(&team.config, &parent, &assignment, routes)?;
                     routed.push(format!("{}: {note}", assignment.name));
-                    profile
+                    (profile, origin)
                 } else {
                     staff(&team.config, &parent, &assignment)?
                 };
-                let profile = resolve_speed(profile, speeds)?;
                 // A replacement keeps the speed tier the replaced worker had, unless it names its own.
                 let inherited = assignment.replaces.as_ref().and_then(|id| team.workers.iter().find(|w| w.id == *id)).and_then(|old| old.service_tier.clone().map(|tier| (old.name.clone(), tier)));
                 let profile = &match inherited {
-                    Some((old, tier)) if profile.service_tier.is_none() => inherit_speed(profile, &old, &tier, speeds)?,
-                    _ => profile,
+                    Some((old, tier)) if !matches!(tier_origin, TierOrigin::Explicit) => inherit_speed(profile, &old, &tier, speeds)?,
+                    _ => resolve_speed(profile, speeds)?,
                 };
                 let session = store.create_session(
                     &parent.project_id,
