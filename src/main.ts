@@ -3488,21 +3488,23 @@ async function btwSlash(side: Session, text: string, toolbar: HTMLElement | null
   notify(`Open the side thread as a full thread to use ${text.split(/\s/)[0]}.`);
   return true;
 }
-type SpeedTier = { id: string; name: string; description: string };
-/** `/fast` arguments: a tier name (`fast`/`on`, `ultrafast`), null for the default (`off`/`default`), undefined to choose. */
+type SpeedTier = import('./types').SpeedTier;
+/** `/fast` arguments: a tier key from the model's Codex catalog (`on` is the tier named Fast), null for
+ * the default (`off`/`default`), undefined to choose. The native side checks the key against the catalog. */
 function fastArgument(argumentsText: string): string | null | undefined {
-  const value = argumentsText.trim().toLowerCase();
+  const value = argumentsText.trim();
   if (!value) return undefined;
-  if (value === 'on' || value === 'fast') return 'fast';
-  if (value === 'ultrafast') return 'ultrafast';
-  if (value === 'off' || value === 'default') return null;
-  throw new Error('Use /fast, /fast on, /fast ultrafast, or /fast off.');
+  const lower = value.toLowerCase();
+  if (lower === 'on') return 'fast';
+  if (lower === 'off' || lower === 'default') return null;
+  return value;
 }
 /** Sets a Codex task's speed tier (null: the model's default); the native side checks it against the model's catalog. */
-async function setSpeed(task: Session, tier: string | null, name?: string): Promise<void> {
+async function setSpeed(task: Session, tier: string | null, tiers: readonly SpeedTier[] = []): Promise<void> {
   const updated = await call<Session>('set_task_preference', { sessionId: task.id, request: { action: 'serviceTier', tier } }); Object.assign(task, updated);
-  const label = tier === null ? 'Default' : name ?? (tier === 'fast' ? 'Fast' : tier === 'ultrafast' ? 'Ultrafast' : tier);
-  notify(`Speed: ${label}`);
+  // Named as the catalog names the tier now saved (by its catalog id).
+  const saved = tiers.find(entry => entry.id === task.codexSettings?.serviceTier);
+  notify(`Speed: ${tier === null ? 'Default' : saved?.name ?? tier}`);
 }
 /** Bare `/fast`: Default plus the speed tiers the installed Codex catalog lists for this task's model. */
 async function showSpeedMenu(task: Session): Promise<void> {
@@ -3512,9 +3514,9 @@ async function showSpeedMenu(task: Session): Promise<void> {
   const anchor = (inPanel ? document.querySelector<HTMLElement>('.btw-panel .model-picker') : null)
     ?? document.querySelector<HTMLElement>('#model-picker-trigger') ?? $('#prompt');
   const items = [{ id: '', label: 'Default', description: "The model's standard speed", selected: !current },
-    ...tiers.map(tier => ({ id: tier.id, label: tier.name, description: tier.description, selected: current === tier.id }))];
-  await showChoices(anchor, { title: 'Speed', width: 320, items, onSelect: async id => {
-    try { await setSpeed(task, id || null, tiers.find(tier => tier.id === id)?.name); } catch (error) { notify(errorText(error)); }
+    ...tiers.map(tier => ({ id: tier.key, label: tier.name, description: tier.description, selected: current === tier.id }))];
+  await showChoices(anchor, { title: 'Speed', width: 320, items, onSelect: async key => {
+    try { await setSpeed(task, key || null, tiers); } catch (error) { notify(errorText(error)); }
   } });
 }
 async function performSlashAction(action: string, argumentsText: string, task: Session): Promise<void> {
@@ -3547,7 +3549,7 @@ async function performSlashAction(action: string, argumentsText: string, task: S
     case 'fast': {
       const wanted = fastArgument(argumentsText);
       if (wanted === undefined) { await showSpeedMenu(task); break; }
-      await setSpeed(task, wanted);
+      await setSpeed(task, wanted, wanted === null ? [] : await call<SpeedTier[]>('codex_service_tiers', { sessionId: task.id }).catch(() => []));
       break;
     }
     case 'plan': {

@@ -12,7 +12,8 @@ import { bindFileLinkContext, refreshFileLinks, type FileLinkContext } from './f
 import { createAgentInput, type AgentInput } from './agent-input';
 import { TailText } from './tail-text';
 import { decodeToolActivity, renderToolActivity } from './tool-activity';
-import { LEAD_RETRY, teamActive, teamHeldUntil, type TeamConfig, type ServiceTierName, speedOptions, type TeamSnapshot, type TeamWorker, type ModelSelection, type TeamLibrary, type TeamSetup } from './architect-types';
+import { keepSpeed, modelSpeedTiers, speedOptions } from './team-mode';
+import { LEAD_RETRY, teamActive, teamHeldUntil, type TeamConfig, type TeamSnapshot, type TeamWorker, type ModelSelection, type TeamLibrary, type TeamSetup } from './architect-types';
 import { resetTime } from './usage-limit';
 import { mountTeamProfiles } from './team-profiles';
 import { infoMark } from './tooltip';
@@ -194,16 +195,28 @@ export function mountArchitectSetup(host: HTMLElement, options: SetupOptions): S
     });
   }
   function renderProfiles(): void {
-    profiles.innerHTML = config.workers.map((profile, index) => `<div class="architect-profile" data-profile-id="${escape(profile.id)}"><div class="architect-profile-heading"><span class="architect-profile-number">${index + 1}</span><input aria-label="Worker profile ${index + 1} name" maxlength="60" value="${escape(profile.name)}"><button type="button" class="icon-button" aria-label="Remove worker profile ${index + 1}" ${config.workers.length === 1 ? 'disabled' : ''}>${icon('close')}</button></div><div class="architect-profile-model"><button type="button" class="architect-model" aria-label="Choose model for worker ${index + 1}" aria-haspopup="dialog" aria-expanded="false">${modelMarkup(profile, providers)}</button><select class="architect-speed" aria-label="Speed for worker ${index + 1}" ${profile.provider === 'codex' ? '' : 'hidden'}>${speedOptions(profile.serviceTier)}</select></div></div>`).join('');
+    profiles.innerHTML = config.workers.map((profile, index) => `<div class="architect-profile" data-profile-id="${escape(profile.id)}"><div class="architect-profile-heading"><span class="architect-profile-number">${index + 1}</span><input aria-label="Worker profile ${index + 1} name" maxlength="60" value="${escape(profile.name)}"><button type="button" class="icon-button" aria-label="Remove worker profile ${index + 1}" ${config.workers.length === 1 ? 'disabled' : ''}>${icon('close')}</button></div><div class="architect-profile-model"><button type="button" class="architect-model" aria-label="Choose model for worker ${index + 1}" aria-haspopup="dialog" aria-expanded="false">${modelMarkup(profile, providers)}</button>${speedSelect(profile, index)}</div><small class="architect-speed-note" data-live hidden></small></div>`).join('');
     profiles.querySelectorAll<HTMLElement>('.architect-profile').forEach((row, index) => {
       row.querySelector('input')!.addEventListener('input', event => { config.workers[index].name = (event.target as HTMLInputElement).value; });
       row.querySelector('.icon-button')!.addEventListener('click', () => { picker?.(); config.workers.splice(index, 1); renderProfiles(); savedProfiles.changed(); });
-      const speed = row.querySelector<HTMLSelectElement>('.architect-speed')!;
-      // A speed tier is Codex's: another harness drops it.
-      const syncSpeed = () => { const profile = config.workers[index]; speed.hidden = profile.provider !== 'codex'; if (speed.hidden) { delete profile.serviceTier; speed.value = ''; } };
-      speed.addEventListener('change', () => { const value = speed.value as '' | ServiceTierName; if (value) config.workers[index].serviceTier = value; else delete config.workers[index].serviceTier; savedProfiles.changed(); });
+      const speed = row.querySelector<HTMLSelectElement>('.architect-speed')!, note = row.querySelector<HTMLElement>('.architect-speed-note')!;
+      // The new model's catalog decides: a tier it lacks is dropped, and the row says so.
+      let before = modelSpeedTiers(providers, config.workers[index].provider, config.workers[index].model);
+      const syncSpeed = () => {
+        const profile = config.workers[index], tiers = modelSpeedTiers(providers, profile.provider, profile.model);
+        const kept = keepSpeed(profile.serviceTier, tiers, profile.model, before);
+        if (kept.tier) profile.serviceTier = kept.tier; else delete profile.serviceTier;
+        speed.innerHTML = speedOptions(tiers, kept.tier); speed.hidden = !speed.innerHTML;
+        note.textContent = kept.note; note.hidden = !kept.note; before = tiers;
+      };
+      speed.addEventListener('change', () => { if (speed.value) config.workers[index].serviceTier = speed.value; else delete config.workers[index].serviceTier; note.hidden = true; savedProfiles.changed(); });
       row.querySelector<HTMLButtonElement>('.architect-model')!.addEventListener('click', event => choose(event.currentTarget as HTMLButtonElement, config.workers[index], true, syncSpeed));
     });
+  }
+  /** Default plus the tiers the model's Codex catalog lists; hidden when it lists none. */
+  function speedSelect(profile: TeamConfig['workers'][number], index: number): string {
+    const options = speedOptions(modelSpeedTiers(providers, profile.provider, profile.model), profile.serviceTier);
+    return `<select class="architect-speed" aria-label="Speed for worker ${index + 1}" ${options ? '' : 'hidden'}>${options}</select>`;
   }
   renderProfiles();
   function refreshModelLabels(): void {
@@ -211,7 +224,11 @@ export function mountArchitectSetup(host: HTMLElement, options: SetupOptions): S
     host.querySelector<HTMLButtonElement>('.architect-model')!.innerHTML = modelMarkup(architect, providers);
     profiles.querySelectorAll<HTMLElement>('.architect-profile').forEach(row => {
       const profile = config.workers.find(profile => profile.id === row.dataset.profileId);
-      if (profile) row.querySelector<HTMLElement>('.architect-model')!.innerHTML = modelMarkup(profile, providers);
+      if (!profile) return;
+      row.querySelector<HTMLElement>('.architect-model')!.innerHTML = modelMarkup(profile, providers);
+      // Catalogs that arrived since: the Speed choices follow them (a saved tier is kept until the model changes).
+      const speed = row.querySelector<HTMLSelectElement>('.architect-speed');
+      if (speed) { speed.innerHTML = speedOptions(modelSpeedTiers(providers, profile.provider, profile.model), profile.serviceTier); speed.hidden = !speed.innerHTML; }
     });
   }
   void Promise.allSettled([...new Set(providers.filter(p => p.installed).map(p => p.id))].map(options.loadModels)).then(refreshModelLabels);

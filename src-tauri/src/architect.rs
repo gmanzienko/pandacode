@@ -18,7 +18,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -138,27 +138,70 @@ pub struct WorkerProfile {
     pub model: String,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
-    /// Codex workers only: `fast` or `ultrafast` (tier names, not catalog ids), resolved
-    /// against the worker's model catalog when it starts; unset is the model's default speed.
+    /// Codex workers only: a speed tier key from the model's Codex catalog (`tier_key` of the
+    /// tier's name), checked against the live catalog when the profile is saved, at dispatch and
+    /// at launch; unset is the model's default speed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
 }
-/// The speed tiers a Codex worker profile may ask for.
-pub const SERVICE_TIERS: &[&str] = &crate::panda_router::SPEED_TIERS;
 pub(crate) use crate::panda_router::split_tier;
-/// A Codex `<model>@fast` / `<model>@ultrafast` slug runs `<model>` at that speed tier (a slug wins
-/// over the profile's serviceTier), so Codex never receives the slug as a model ID. Other harnesses
-/// refuse those suffixes.
-pub(crate) fn with_speed(mut profile: WorkerProfile) -> Result<WorkerProfile> {
-    let (base, Some(tier)) = split_tier(&profile.model) else {
+use crate::command_operations::{self as codex_ops, ServiceTier};
+/// The installed Codex catalog's speed tiers per model, read before the team state is locked:
+/// `None` when nothing asked for a tier, `Some(Err)` when the catalog could not be read.
+pub(crate) type SpeedCatalog = Option<std::result::Result<HashMap<String, Vec<ServiceTier>>, String>>;
+/// A Codex profile's speed tier, resolved against the live catalog: a `<model>@<key>` slug runs
+/// `<model>` at that tier (the slug wins over `serviceTier`), so Codex never receives the slug as a
+/// model ID. A tier the catalog does not list for the model, or a catalog that cannot be read, is
+/// an error: a requested speed never silently becomes the default. Other harnesses' model IDs keep
+/// any `@`.
+pub(crate) fn resolve_speed(mut profile: WorkerProfile, speeds: &SpeedCatalog) -> Result<WorkerProfile> {
+    if profile.provider != "codex" {
+        return Ok(profile);
+    }
+    let catalog = speeds.as_ref().and_then(|s| s.as_ref().ok());
+    let (base, key) = split_tier(&profile.model);
+    // A model whose own catalog ID has an `@` is a model, not a slug.
+    if let Some(key) = key.filter(|_| !catalog.is_some_and(|c| c.contains_key(&profile.model))) {
+        let (base, key) = (base.to_string(), key.to_string());
+        profile.model = base;
+        profile.service_tier = Some(key);
+    }
+    let Some(wanted) = profile.service_tier.clone() else {
         return Ok(profile);
     };
-    if profile.provider != "codex" {
-        return Err(format!("{}: only Codex models take a speed tier (@{tier}); use {base}.", profile.model));
-    }
-    profile.model = base.to_string();
-    profile.service_tier = Some(tier.to_string());
+    let tiers = match speeds {
+        None => return Err(format!("{}.", codex_ops::TIER_UNREAD)),
+        Some(Err(error)) => return Err(format!("{}: {}", codex_ops::TIER_UNREAD, bounded(error.trim_end_matches('.'), 300))),
+        Some(Ok(catalog)) => catalog.get(&profile.model).ok_or_else(|| codex_ops::tier_missing(&wanted, &profile.model))?,
+    };
+    let tier = codex_ops::find_tier(tiers, &wanted).ok_or_else(|| codex_ops::tier_missing(&wanted, &profile.model))?;
+    profile.service_tier = Some(tier.key.clone());
     Ok(profile)
+}
+/// Whether a Codex profile asks for a speed tier (a slug or `serviceTier`).
+pub(crate) fn wants_speed(profile: &WorkerProfile) -> bool {
+    profile.provider == "codex" && (profile.service_tier.is_some() || split_tier(&profile.model).1.is_some())
+}
+/// Reads the installed Codex catalog's speed tiers (bounded), to check requested tiers.
+pub(crate) async fn read_speeds(cwd: &std::path::Path) -> std::result::Result<HashMap<String, Vec<ServiceTier>>, String> {
+    tokio::time::timeout(std::time::Duration::from_secs(30), codex_ops::catalog_speed_tiers(cwd))
+        .await
+        .unwrap_or_else(|_| Err("Codex did not list its models in time.".into()))
+}
+/// Saved worker profiles' speed tiers must be in the live Codex catalog for their model.
+pub(crate) async fn check_profile_speeds(cwd: &std::path::Path, profiles: &[WorkerProfile]) -> Result<()> {
+    let wanted: Vec<&WorkerProfile> = profiles.iter().filter(|p| wants_speed(p)).collect();
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let speeds = Some(read_speeds(cwd).await);
+    check_speeds(&wanted, &speeds)
+}
+fn check_speeds(profiles: &[&WorkerProfile], speeds: &SpeedCatalog) -> Result<()> {
+    for profile in profiles {
+        resolve_speed((*profile).clone(), speeds).map_err(|e| format!("{}: {e}", profile.name))?;
+    }
+    Ok(())
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -261,12 +304,10 @@ pub struct Worker {
     /// settled worker is cancelled, replaced or resolved, none of which edits anything.
     #[serde(default)]
     pub wrote_at: i64,
-    /// The speed tier its profile asks for (`fast`/`ultrafast`); Codex workers only.
+    /// The speed tier key it runs at, checked against its model's catalog at dispatch and at
+    /// launch; Codex workers only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
-    /// A note from its launch for the lead, such as a speed tier the model's catalog lacked.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub launch_note: Option<String>,
 }
 fn is_zero(n: &usize) -> bool {
     *n == 0
@@ -532,13 +573,13 @@ fn validate_profiles(profiles: &[WorkerProfile]) -> Result<()> {
             &worker.provider,
             worker.reasoning_effort.as_deref(),
         )?;
-        with_speed(worker.clone())?;
         if let Some(tier) = &worker.service_tier {
             if worker.provider != "codex" {
                 return Err(format!("{}: only Codex workers take a speed tier.", worker.name));
             }
-            if !SERVICE_TIERS.contains(&tier.as_str()) {
-                return Err(format!("{}: the speed tier must be \"fast\" or \"ultrafast\".", worker.name));
+            // A key as the catalog names it; whether the model has it is checked against the live catalog.
+            if tier.is_empty() || tier.len() > 64 || codex_ops::tier_key(tier) != *tier {
+                return Err(format!("{}: the speed tier must be a tier key from the Codex catalog.", worker.name));
             }
         }
     }
@@ -916,6 +957,15 @@ pub async fn architect_configure(
     architect: Option<profiles::ModelSelection>,
     profile_id: Option<String>,
 ) -> Result<Option<TeamSnapshot>> {
+    // A worker profile's speed tier must be in the live Codex catalog for its model.
+    if let Some(workers) = config.as_ref().map(|c| &c.workers).filter(|w| w.iter().any(wants_speed)) {
+        let cwd = {
+            let store = state.store.lock().map_err(|e| e.to_string())?;
+            let task = store.session(&session_id)?;
+            store.workspace_root(&task.project_id, Some(&session_id))?
+        };
+        check_profile_speeds(&cwd, workers).await?;
+    }
     let changed = configure_state(
         &state,
         &session_id,
@@ -1599,8 +1649,13 @@ pub fn host(
                         } else {
                             routing::AutoRoutes::default()
                         };
+                        // A requested speed tier is checked against the live Codex catalog before any worker exists.
+                        let speeds = match speed_context(&app, &sid, generation, &name, &args)? {
+                            Some(cwd) => Some(read_speeds(&cwd).await),
+                            None => None,
+                        };
                         let caller = caller.as_ref().map(|(id, attempt)| (id.as_str(), *attempt));
-                        dispatch(&app, &sid, generation, caller, &name, args, &stopped, &routes)?
+                        dispatch(&app, &sid, generation, caller, &name, args, &stopped, &routes, &speeds)?
                     };
                     // Coordination results carry it already; every other team tool result gets it here.
                     coordination::add_inbox(&app.state::<AppState>(), &sid, actor.id(), &mut result);
@@ -1609,6 +1664,29 @@ pub fn host(
             })
         }),
     })
+}
+/// The lead's checkout when this dispatch may ask for a Codex speed tier: a Codex model slug, or a
+/// team profile that carries a tier (named, or matched by its model when routed or chosen directly).
+fn speed_context(app: &tauri::AppHandle, sid: &str, generation: u64, name: &str, args: &Value) -> Result<Option<std::path::PathBuf>> {
+    if name != "pandacode_dispatch_workers" {
+        return Ok(None);
+    }
+    let state = app.state::<AppState>();
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let team = load(&store, sid)?.ok_or("Team unavailable.")?;
+    if !active(&team.status) || team.generation != generation {
+        return Err("Team is no longer active.".into());
+    }
+    if !asks_speed(&team.config, args) {
+        return Ok(None);
+    }
+    let lead = store.session(sid)?;
+    Ok(Some(store.workspace_root(&lead.project_id, Some(sid))?))
+}
+/// Whether any assignment may run at a speed tier (a superset: `dispatch_as` decides).
+fn asks_speed(config: &TeamConfig, args: &Value) -> bool {
+    let slug = args["assignments"].as_array().into_iter().flatten().any(|a| a["provider"] == "codex" && a["model"].as_str().is_some_and(|m| split_tier(m).1.is_some()));
+    slug || config.workers.iter().any(wants_speed)
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1757,7 +1835,6 @@ fn summaries(team: &TeamSnapshot, offset: usize, owner: Option<&str>) -> Value {
         if let Some(seat) = &worker.council {
             item["council"] = json!(seat);
         }
-        if let Some(note) = &worker.launch_note { item["note"] = json!(note); }
         let length = serde_json::to_vec(&item).map_or(PAGE_BYTES, |s| s.len() + 1);
         // A page always moves on, however large its first worker is.
         if !workers.is_empty() && bytes + length > PAGE_BYTES {
@@ -1853,6 +1930,7 @@ fn dispatch(
     args: Value,
     stopped: &AtomicBool,
     routes: &routing::AutoRoutes,
+    speeds: &SpeedCatalog,
 ) -> Result<Value> {
     let (result, changed) = dispatch_as(
         &app.state::<AppState>(),
@@ -1863,6 +1941,7 @@ fn dispatch(
         args,
         stopped,
         routes,
+        speeds,
     )?;
     if let Some(team) = changed {
         emit(app, &team);
@@ -1891,11 +1970,23 @@ fn dispatch_state_routed(
     stopped: &AtomicBool,
     routes: &routing::AutoRoutes,
 ) -> Result<(Value, Option<TeamSnapshot>)> {
-    dispatch_as(state, sid, generation, None, name, args, stopped, routes)
+    let speeds = TEST_SPEEDS.with(|s| s.borrow().clone());
+    dispatch_as(state, sid, generation, None, name, args, stopped, routes, &speeds)
 }
-/// `routes` holds Panda Router's picks for this dispatch's `profileId: "auto"` assignments,
-/// computed before the team state was locked. `caller` is a direct worker's ID and run attempt
-/// when it manages its own sub-workers; `None` is the architect.
+#[cfg(test)]
+thread_local!(static TEST_SPEEDS: std::cell::RefCell<SpeedCatalog> = const { std::cell::RefCell::new(None) });
+/// Runs `f` with dispatches in this thread seeing `speeds` as the Codex catalog read before them.
+#[cfg(test)]
+fn with_speeds<T>(speeds: SpeedCatalog, f: impl FnOnce() -> T) -> T {
+    let previous = TEST_SPEEDS.with(|s| s.replace(speeds));
+    let out = f();
+    TEST_SPEEDS.with(|s| *s.borrow_mut() = previous);
+    out
+}
+/// `routes` holds Panda Router's picks for this dispatch's `profileId: "auto"` assignments, and
+/// `speeds` the Codex catalog's speed tiers when an assignment may ask for one, both read before
+/// the team state was locked. `caller` is a direct worker's ID and run attempt when it manages its
+/// own sub-workers; `None` is the architect.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_as(
     state: &AppState,
@@ -1906,6 +1997,7 @@ fn dispatch_as(
     mut args: Value,
     stopped: &AtomicBool,
     routes: &routing::AutoRoutes,
+    speeds: &SpeedCatalog,
 ) -> Result<(Value, Option<TeamSnapshot>)> {
     crate::agent_tools::drop_nulls(&mut args);
     let agents = state.agents.lock().map_err(|e| e.to_string())?;
@@ -2033,7 +2125,7 @@ fn dispatch_as(
                 } else {
                     staff(&team.config, &parent, &assignment)?
                 };
-                let profile = &with_speed(profile)?;
+                let profile = &resolve_speed(profile, speeds)?;
                 let session = store.create_session(
                     &parent.project_id,
                     &profile.provider,
@@ -2093,7 +2185,6 @@ fn dispatch_as(
                     score_nudged: false,
                     wrote_at: 0,
                     service_tier: profile.service_tier.clone().filter(|_| profile.provider == "codex"),
-                    launch_note: None,
                 });
                 changed = true;
             }
@@ -2354,7 +2445,10 @@ pub(crate) fn wake(app: tauri::AppHandle) {
                 let action = next_action(&app);
                 match action {
                     Ok(Some(action)) => {
-                        prepare_speed(&app, &action).await;
+                        if let Err(error) = prepare_speed(&app, &action).await {
+                            fail_launch(&app, &action.admission, &action.sid, &error);
+                            continue;
+                        }
                         let state = app.state::<AppState>();
                         if let Err(error) = crate::launch_team_task(
                             app.clone(),
@@ -2405,43 +2499,28 @@ struct Launch {
     images: Option<Vec<String>>,
     admission: Admission,
 }
-/// A Codex worker whose profile asks for a speed tier gets the model's catalog id saved in
-/// its session's settings before its first run, so its thread starts at that speed. A tier
-/// the catalog lacks (or a catalog that cannot be read) starts it at the default speed with
-/// a note for the lead; the launch itself never fails for it.
-async fn prepare_speed(app: &tauri::AppHandle, action: &Launch) {
+/// A Codex worker with a speed tier gets the tier's catalog id saved in its session's settings
+/// before its first run, so its thread starts at that speed and follow-ups keep it. A tier the
+/// model's live catalog does not list, or a catalog that cannot be read, fails the launch with
+/// that reason: a requested speed never silently becomes the default.
+async fn prepare_speed(app: &tauri::AppHandle, action: &Launch) -> std::result::Result<(), String> {
     let state = app.state::<AppState>();
-    let request = match state.store.lock() {
-        Ok(store) => speed_request(&store, &action.admission, &action.sid),
-        Err(error) => Err(error.to_string()),
+    let request = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        speed_request(&store, &action.admission, &action.sid)?
     };
-    let (cwd, model, tier) = match request {
-        Ok(Some(request)) => request,
-        Ok(None) => return,
-        Err(error) => {
-            eprintln!("Worker speed tier: {error}");
-            return;
-        }
+    let Some((cwd, model, tier)) = request else {
+        return Ok(());
     };
-    let resolved = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        crate::command_operations::service_tier(&cwd, &model, &tier),
-    )
-    .await
-    .unwrap_or_else(|_| Err("Codex did not list its models in time.".into()));
-    let applied = match state.store.lock() {
-        Ok(store) => apply_speed(&store, &action.admission, &action.sid, &model, &tier, resolved),
-        Err(error) => Err(error.to_string()),
-    };
-    match applied {
-        Ok(Some(team)) => emit(app, &team),
-        Ok(None) => {}
-        Err(error) => eprintln!("Worker speed tier: {error}"),
-    }
+    let tiers = tokio::time::timeout(std::time::Duration::from_secs(30), codex_ops::service_tiers(&cwd, &model))
+        .await
+        .unwrap_or_else(|_| Err("Codex did not list its models in time.".into()));
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    apply_speed(&store, &action.sid, &model, &tier, tiers)
 }
-/// The checkout, model and tier name of a launching Codex worker whose speed is not chosen yet.
-/// A session that already carries `serviceTier` (resolved, or a recorded fallback) keeps it, so
-/// follow-ups and resumes never look it up again.
+/// The checkout, model and tier key of a launching Codex worker whose speed is not chosen yet.
+/// A session that already carries `serviceTier` keeps it, so follow-ups and resumes never look it
+/// up again.
 fn speed_request(store: &Store, admission: &Admission, sid: &str) -> Result<Option<(std::path::PathBuf, String, String)>> {
     if sid == admission.parent {
         return Ok(None);
@@ -2462,57 +2541,31 @@ fn speed_request(store: &Store, admission: &Admission, sid: &str) -> Result<Opti
     let cwd = store.workspace_root(&session.project_id, Some(sid))?;
     Ok(Some((cwd, session.model, tier)))
 }
-/// Saves the looked-up tier in the worker's session (null, the default speed, when it failed),
-/// and returns the team when a note for the lead was added.
+/// Saves the catalog id of the worker's tier in its session, or says why it cannot run at it.
 fn apply_speed(
     store: &Store,
-    admission: &Admission,
     sid: &str,
     model: &str,
     tier: &str,
-    resolved: std::result::Result<String, String>,
-) -> Result<Option<TeamSnapshot>> {
+    tiers: std::result::Result<Vec<ServiceTier>, String>,
+) -> Result<()> {
     let session = store.session(sid)?;
     // The worker moved to another model or harness meanwhile: its next launch decides again.
     if session.provider != "codex" || session.model != model {
-        return Ok(None);
+        return Ok(());
     }
+    let tiers = tiers.map_err(|e| format!("{}: {}", codex_ops::TIER_UNREAD, bounded(e.trim_end_matches('.'), 300)))?;
+    let id = codex_ops::find_tier(&tiers, tier).ok_or_else(|| codex_ops::tier_missing(tier, model))?.id.clone();
     let mut settings = session.codex_settings.unwrap_or_else(|| json!({}));
     let Some(object) = settings.as_object_mut() else {
         return Err("The worker's saved Codex settings are invalid.".into());
     };
-    let (value, note) = match resolved {
-        Ok(id) => (json!(id), None),
-        Err(error) => (
-            Value::Null,
-            Some(format!(
-                "{} speed unavailable for {} ({}); started at default speed.",
-                crate::command_operations::tier_label(tier),
-                bounded(model, 80),
-                bounded(error.trim_end_matches('.'), 160)
-            )),
-        ),
-    };
-    object.insert("serviceTier".into(), value);
+    object.insert("serviceTier".into(), json!(id));
     store
         .db
         .execute("UPDATE sessions SET codex_settings=?2 WHERE id=?1", params![sid, settings.to_string()])
         .map_err(|e| e.to_string())?;
-    let Some(note) = note else {
-        return Ok(None);
-    };
-    let Some(mut team) = load(store, &admission.parent)? else {
-        return Ok(None);
-    };
-    if team.generation != admission.generation {
-        return Ok(None);
-    }
-    let Some(worker) = team.workers.iter_mut().find(|w| w.session_id == sid) else {
-        return Ok(None);
-    };
-    worker.launch_note = Some(note);
-    save(store, &mut team)?;
-    Ok(Some(team))
+    Ok(())
 }
 /// Reserves an architect turn that PandaCode starts itself and saves the team, unless that many turns
 /// in a row made no progress: then it pauses the team, so nothing spends tokens unattended forever.
@@ -3113,13 +3166,23 @@ fn fail_over(store: &Store, team: &mut TeamSnapshot, index: usize, reason: &str)
     let Some(next) = crate::model_health::same_model_alternatives(&failed, &pool).into_iter().next() else {
         return Ok(false);
     };
+    // A speed tier is a Codex catalog's: another harness cannot run it, so the worker stays failed
+    // and says why rather than continuing at a different speed.
+    if let Some(tier) = worker.service_tier.clone().filter(|_| next.provider != "codex") {
+        let reason = format!("No failover to {}: the {} speed tier runs only on Codex.", next.provider, codex_ops::tier_label(&tier));
+        let worker = &mut team.workers[index];
+        if !worker.error.as_deref().is_some_and(|e| e.contains(&reason)) {
+            worker.error = Some(bounded(format!("{} {reason}", worker.error.as_deref().unwrap_or_default()).trim_start(), 1024));
+        }
+        return Ok(false);
+    }
     if routing::failed_chain(store, team, &worker.id)?.map_or(0, |c| c.attempts) >= routing::MAX_ATTEMPTS {
         return Ok(false);
     }
     let roster = routing::roster_entry(&team.config, &next.provider, &next.model);
     let reasoning_effort = routing::effort(&next.provider, worker.reasoning_effort.as_ref()).or_else(|| roster.and_then(|p| p.reasoning_effort.clone()));
     let profile_id = roster.map_or_else(|| routing::AUTO.to_string(), |p| p.id.clone());
-    // A speed tier is Codex's: another harness drops it, and the fresh session resolves it again.
+    // Moving onto Codex takes the roster's tier, which the fresh session resolves (or fails on) at launch.
     let service_tier = roster.filter(|_| next.provider == "codex").and_then(routing::profile_tier);
     store.db.execute("UPDATE sessions SET provider=?2,model=?3,reasoning_effort=?4,resume_id=NULL,goal_state=NULL,codex_settings=NULL,context_used_tokens=NULL,context_window=NULL WHERE id=?1", params![worker.session_id, next.provider, next.model, reasoning_effort]).map_err(|e| e.to_string())?;
     let earlier = worker.error.as_deref().and_then(|e| e.find(FAILOVER).map(|i| format!(" {}", &e[i..]))).unwrap_or_default();
@@ -3133,7 +3196,6 @@ fn fail_over(store: &Store, team: &mut TeamSnapshot, index: usize, reason: &str)
     worker.reasoning_effort = reasoning_effort;
     worker.profile_id = profile_id;
     worker.service_tier = service_tier;
-    worker.launch_note = None;
     worker.status = "queued".into();
     worker.failovers += 1;
     worker.nudged = false;
@@ -3289,7 +3351,6 @@ fn review_item(team: &TeamSnapshot, w: &Worker, summary: &str, budgeted: Option<
     let checkpoint = budgeted.or_else(|| w.checkpoint.as_ref().and_then(|c| take_checkpoint(c, remaining)));
     let mut item = json!({"id":w.id,"name":w.name,"status":w.status,"attempt":w.attempt,"changed":changed,"summary":summary,"error":if changed{w.error.as_deref().map(|e|bounded(e,512))}else{None},"abandoned":w.abandoned,"checkpoint":checkpoint});
     mark_cut(&mut item, summary);
-    if let Some(note) = w.launch_note.as_deref().filter(|_| changed) { item["note"] = json!(note); }
     item
 }
 pub(crate) fn activity(app: &tauri::AppHandle, sid: &str, admission: Option<&Admission>) {

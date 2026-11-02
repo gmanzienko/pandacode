@@ -5,7 +5,7 @@ use crate::integrations::ControlClient;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
@@ -785,18 +785,57 @@ async fn conversation_messages_with_on(
     Ok(messages.into())
 }
 
-/// Fast is a catalog capability, never an invented model setting.
+/// `/fast on` and the older Fast toggle: the tier the catalog names Fast, never an invented setting.
 pub async fn fast_service_tier(cwd: &Path, model: &str) -> Result<String, String> {
-    service_tier(cwd, model, "fast").await
+    service_tier(cwd, model, FAST_KEY).await
 }
 
-/// One speed tier the Codex catalog offers for a model (`priority` is named Fast).
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+/// The key of the tier the catalog names Fast (`/fast on`).
+pub const FAST_KEY: &str = "fast";
+
+/// One speed tier the Codex catalog offers for a model. `key` is how people and slugs name it
+/// (`tier_key` of its name: Fast -> `fast`, "Turbo Max" -> `turbo-max`); `id` is what Codex
+/// receives as `serviceTier` (Fast's is `priority`).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ServiceTier {
     pub id: String,
+    pub key: String,
     pub name: String,
     pub description: String,
 }
+
+/// A tier's key: its name lowercased, each run of other characters than letters and digits one
+/// `-`, trimmed. Empty when the name has no letters or digits.
+pub fn tier_key(name: &str) -> String {
+    let mut key = String::new();
+    let mut gap = false;
+    for c in name.chars() {
+        if c.is_alphanumeric() {
+            if gap && !key.is_empty() {
+                key.push('-');
+            }
+            gap = false;
+            key.extend(c.to_lowercase());
+        } else {
+            gap = true;
+        }
+    }
+    key
+}
+
+/// The tier `wanted` names: by key (any case or spacing of its name), else by catalog id.
+pub fn find_tier<'a>(tiers: &'a [ServiceTier], wanted: &str) -> Option<&'a ServiceTier> {
+    let key = tier_key(wanted);
+    tiers.iter().find(|t| !key.is_empty() && t.key == key).or_else(|| tiers.iter().find(|t| t.id == wanted))
+}
+
+/// "That tier is not in the catalog for this model", for a tier named `wanted`.
+pub fn tier_missing(wanted: &str, model: &str) -> String {
+    format!("{} is not available for {model} in the installed Codex catalog.", tier_label(wanted))
+}
+
+/// Why a speed tier could not be checked.
+pub const TIER_UNREAD: &str = "Couldn't read the Codex catalog to check the speed tier";
 
 fn valid_model(model: &str) -> Result<(), String> {
     if model.len() > 200 || model.chars().any(char::is_control) {
@@ -811,7 +850,7 @@ pub async fn service_tier(cwd: &Path, model: &str, wanted: &str) -> Result<Strin
     if wanted.is_empty() || wanted.len() > 64 || wanted.chars().any(char::is_control) {
         return Err("Invalid Codex speed tier.".into());
     }
-    let mut client = ControlClient::start(cwd).await?;
+    let mut client = catalog_client(cwd).await?;
     let result = tier_with(&mut client, model, wanted).await;
     client.finish().await;
     result
@@ -820,10 +859,59 @@ pub async fn service_tier(cwd: &Path, model: &str, wanted: &str) -> Result<Strin
 /// Every speed tier the installed Codex catalog lists for this model, at most 16.
 pub async fn service_tiers(cwd: &Path, model: &str) -> Result<Vec<ServiceTier>, String> {
     valid_model(model)?;
-    let mut client = ControlClient::start(cwd).await?;
+    let mut client = catalog_client(cwd).await?;
     let result = tiers_with(&mut client, model).await;
     client.finish().await;
     result
+}
+
+/// Every model's speed tiers in the installed Codex catalog, in one read: by model and by catalog
+/// id, and under `default` for the default model.
+pub async fn catalog_speed_tiers(cwd: &Path) -> Result<HashMap<String, Vec<ServiceTier>>, String> {
+    let mut client = catalog_client(cwd).await?;
+    let result = all_tiers_with(&mut client).await;
+    client.finish().await;
+    result
+}
+
+/// A control client, waiting briefly while another catalog read holds the discovery slot.
+async fn catalog_client(cwd: &Path) -> Result<ControlClient, String> {
+    let mut attempt = 0;
+    loop {
+        match ControlClient::start(cwd).await {
+            Err(error) if error.contains("busy") && attempt < 10 => {
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
+async fn all_tiers_with(client: &mut impl Transport) -> Result<HashMap<String, Vec<ServiceTier>>, String> {
+    let mut models = HashMap::new();
+    let mut cursor = Value::Null;
+    let mut cursors = HashSet::new();
+    for _ in 0..MAX_PAGES {
+        let result = client.request("model/list", json!({"cursor":cursor,"limit":100,"includeHidden":true})).await?;
+        for item in array(&result, "data")?.iter().take(100) {
+            let tiers = catalog_tiers(item);
+            for name in [&item["model"], &item["id"]].into_iter().filter_map(|v| nonempty(v, 200)) {
+                models.entry(name).or_insert_with(|| tiers.clone());
+            }
+            if item["isDefault"] == true {
+                models.entry("default".to_string()).or_insert_with(|| tiers.clone());
+            }
+        }
+        let Some(next) = nonempty(&result["nextCursor"], 4096) else {
+            break;
+        };
+        if !cursors.insert(next.clone()) {
+            break;
+        }
+        cursor = Value::String(next);
+    }
+    Ok(models)
 }
 
 pub async fn resolved_model(cwd: &Path, model: &str) -> Result<String, String> {
@@ -853,12 +941,17 @@ pub(crate) fn catalog_tiers(item: &Value) -> Vec<ServiceTier> {
         let name = text(&tier["name"], 64)
             .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(|| id.clone());
+        // Named by its key; a name without letters or digits falls back to the id's.
+        let key = Some(tier_key(&name)).filter(|k| !k.is_empty()).unwrap_or_else(|| tier_key(&id));
+        if key.is_empty() || key.len() > 64 || tiers.iter().any(|t| t.key == key) {
+            continue;
+        }
         let description: String = text(&tier["description"], 4096)
             .unwrap_or_default()
             .chars()
             .take(240)
             .collect();
-        tiers.push(ServiceTier { id, name, description });
+        tiers.push(ServiceTier { id, key, name, description });
         if tiers.len() == 16 {
             break;
         }
@@ -872,21 +965,12 @@ async fn tiers_with(client: &mut impl Transport, model: &str) -> Result<Vec<Serv
 
 async fn tier_with(client: &mut impl Transport, model: &str, wanted: &str) -> Result<String, String> {
     let tiers = tiers_with(client, model).await?;
-    // An exact id wins over a name: `fast` is the tier named Fast (id `priority`) unless an id is `fast`.
-    tiers
-        .iter()
-        .find(|tier| tier.id.eq_ignore_ascii_case(wanted))
-        .or_else(|| tiers.iter().find(|tier| tier.name.eq_ignore_ascii_case(wanted)))
+    find_tier(&tiers, wanted)
         .map(|tier| tier.id.clone())
-        .ok_or_else(|| {
-            format!(
-                "{} is not available for this model in the installed Codex catalog.",
-                tier_label(wanted)
-            )
-        })
+        .ok_or_else(|| tier_missing(wanted, if model.is_empty() { "default" } else { model }))
 }
 
-/// "fast" -> "Fast", "ultrafast" -> "Ultrafast".
+/// A tier key as a label for a tier the catalog does not list: its first letter capitalized.
 pub fn tier_label(wanted: &str) -> String {
     let mut chars = wanted.chars();
     chars
@@ -1018,29 +1102,53 @@ mod tests {
                 tier_with(&mut fake, model, wanted).await
             }
         };
-        // By name or id, any case: Fast is the tier named Fast (id `priority`).
+        // By key (the name, any case or spacing) or catalog id: Fast is the tier named Fast (id `priority`).
         assert_eq!(lookup("model-one", "fast").await.unwrap(), "priority");
-        assert_eq!(lookup("model-one", "Priority").await.unwrap(), "priority");
+        assert_eq!(lookup("model-one", "priority").await.unwrap(), "priority");
         assert_eq!(lookup("model-one", "ULTRAFAST").await.unwrap(), "ultrafast");
         assert_eq!(lookup("model-two", "fast").await.unwrap(), "priority");
         assert_eq!(
             lookup("model-two", "ultrafast").await.unwrap_err(),
-            "Ultrafast is not available for this model in the installed Codex catalog."
+            "Ultrafast is not available for model-two in the installed Codex catalog."
         );
         assert!(lookup("model-three", "fast").await.is_err());
         let mut fake = Fake::new(vec![("model/list", catalog.clone())]);
         let tiers = tiers_with(&mut fake, "model-one").await.unwrap();
         assert_eq!(
-            tiers.iter().map(|t| (t.id.as_str(), t.name.as_str())).collect::<Vec<_>>(),
-            vec![("priority", "Fast"), ("ultrafast", "Ultrafast")]
+            tiers.iter().map(|t| (t.id.as_str(), t.key.as_str(), t.name.as_str())).collect::<Vec<_>>(),
+            vec![("priority", "fast", "Fast"), ("ultrafast", "ultrafast", "Ultrafast")]
         );
         assert_eq!(tiers[0].description, "2x speed, increased usage");
         // Malformed entries are skipped, duplicates kept once, a missing name falls back to the id.
-        let odd = json!({"model":"m","serviceTiers":[{"id":""},{"id":"x"},{"id":"flex"},{"id":"flex","name":"Again"},{"name":"No id"}]});
+        let odd = json!({"model":"m","serviceTiers":[{"id":""},{"id":"flex"},{"id":"flex","name":"Again"},{"id":"other","name":"FLEX"},{"name":"No id"},{"id":"***","name":"!!"}]});
         assert_eq!(
             catalog_tiers(&odd),
-            vec![ServiceTier { id: "flex".into(), name: "flex".into(), description: String::new() }]
+            vec![ServiceTier { id: "flex".into(), key: "flex".into(), name: "flex".into(), description: String::new() }]
         );
+    }
+    #[test]
+    fn tier_keys_come_from_catalog_names() {
+        for (name, key) in [("Fast", "fast"), ("Ultrafast", "ultrafast"), ("Turbo Max", "turbo-max"), ("  Turbo -- MAX!! ", "turbo-max"), ("x2 / Pro", "x2-pro"), ("!!", "")] {
+            assert_eq!(tier_key(name), key, "{name}");
+        }
+    }
+    #[tokio::test]
+    async fn a_fictional_tier_flows_through_lookup_and_the_whole_catalog() {
+        let catalog = json!({"data":[
+            {"id":"nova","model":"nova-9","isDefault":true,"serviceTiers":[{"id":"turbo","name":"Turbo Max","description":"Fictional."}]},
+            {"id":"plain","model":"plain-1","serviceTiers":[]}
+        ],"nextCursor":null});
+        let mut fake = Fake::new(vec![("model/list", catalog.clone())]);
+        assert_eq!(tier_with(&mut fake, "nova-9", "turbo-max").await.unwrap(), "turbo");
+        let mut fake = Fake::new(vec![("model/list", catalog.clone())]);
+        assert_eq!(tier_with(&mut fake, "nova-9", "Turbo Max").await.unwrap(), "turbo");
+        let mut fake = Fake::new(vec![("model/list", catalog.clone())]);
+        assert_eq!(tier_with(&mut fake, "plain-1", "turbo-max").await.unwrap_err(), "Turbo-max is not available for plain-1 in the installed Codex catalog.");
+        let mut fake = Fake::new(vec![("model/list", catalog)]);
+        let all = all_tiers_with(&mut fake).await.unwrap();
+        let keys = |m: &str| all[m].iter().map(|t| t.key.as_str()).collect::<Vec<_>>();
+        assert_eq!((keys("nova-9"), keys("nova"), keys("default"), keys("plain-1")), (vec!["turbo-max"], vec!["turbo-max"], vec!["turbo-max"], vec![]));
+        assert_eq!(all["nova-9"][0].id, "turbo");
     }
     #[tokio::test]
     async fn imported_transcript_uses_bounded_pages_in_chronological_order() {

@@ -282,6 +282,9 @@ function remoteCatalog(id: ProviderId): ProviderModel[] {
   if (id === 'claude') return ['sonnet', 'opus'].map(model => fallbackModel('claude', model));
   return id === 'codex' ? ['gpt-5-codex', 'gpt-5'].map(model => fallbackModel('codex', model)) : [];
 }
+/** Speed tiers as the Codex catalog lists them (native adds each key from its name). */
+const PREVIEW_FAST = { id: 'priority', key: 'fast', name: 'Fast', description: '2x speed, increased usage' };
+const PREVIEW_ULTRAFAST = { id: 'ultrafast', key: 'ultrafast', name: 'Ultrafast', description: 'The fastest available responses for latency-sensitive work.' };
 const catalogs: Record<ProviderId, ProviderModel[]> = {
   // Recorded from `kilo acp` 7.3.41; efforts belong to its current model only.
   kilo: [
@@ -341,8 +344,10 @@ const catalogs: Record<ProviderId, ProviderModel[]> = {
     { id: 'haiku', name: 'Claude Haiku 4.5', description: 'Sample Claude Code model metadata.', contextWindow: 200000 },
   ],
   codex: [
-    { id: 'gpt-6-astra', name: 'GPT-6-Astra', description: 'Sample Codex model metadata.', reasoningEfforts: ['low', 'medium', 'high', 'xhigh'].map(id => ({ id, name: id === 'xhigh' ? 'Extra high' : id[0].toUpperCase() + id.slice(1), description: `Sample ${id} effort.` })), defaultReasoningEffort: 'medium', contextWindow: 400000 },
+    { id: 'gpt-6-astra', name: 'GPT-6-Astra', description: 'Sample Codex model metadata.', reasoningEfforts: ['low', 'medium', 'high', 'xhigh'].map(id => ({ id, name: id === 'xhigh' ? 'Extra high' : id[0].toUpperCase() + id.slice(1), description: `Sample ${id} effort.` })), defaultReasoningEffort: 'medium', contextWindow: 400000, speedTiers: [PREVIEW_FAST, PREVIEW_ULTRAFAST] },
     { id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol', description: 'Sample Codex model metadata.', reasoningEfforts: ['low', 'medium', 'high'].map(id => ({ id, name: id[0].toUpperCase() + id.slice(1), description: `Sample ${id} effort.` })) },
+    { id: 'gpt-6.1-sol', name: 'GPT-6.1-Sol', description: 'Sample Codex model metadata.', speedTiers: [PREVIEW_FAST, PREVIEW_ULTRAFAST] },
+    { id: 'gpt-6-luna', name: 'GPT-6-Luna', description: 'Sample Codex model metadata.', speedTiers: [PREVIEW_FAST] },
   ],
   kimi: [{ id: 'kimi-code/k3', name: 'K3', description: 'Sample configured Kimi model.', reasoningEfforts: [{ id: 'on', name: 'On', description: 'Enable thinking.' }, { id: 'off', name: 'Off', description: 'Disable thinking.' }], contextWindow: 256000 }],
   // Mirrors the initialize modelState that `grok agent stdio` advertises.
@@ -730,12 +735,13 @@ const importedPreviewItems = new Set<string>();
 function codexTask(value: unknown): Session {
   const task = session(value); if (task.provider !== 'codex') throw new Error('Use the Codex harness for this command.'); return task;
 }
-/** Sample speed tiers like the Codex catalog's: every model has Fast, GPT-6 Astra and the default model also Ultrafast. */
-function previewServiceTiers(model: string): { id: string; name: string; description: string }[] {
-  const fast = { id: 'priority', name: 'Fast', description: '2x speed, increased usage' };
-  const ultrafast = { id: 'ultrafast', name: 'Ultrafast', description: 'The fastest available responses for latency-sensitive work.' };
-  return model === 'gpt-6-astra' || model === 'default' || !model ? [fast, ultrafast] : [fast];
+/** A model's speed tiers in the sample Codex catalog (the default model has Fast and Ultrafast). */
+function previewServiceTiers(model: string): { id: string; key: string; name: string; description: string }[] {
+  if (model === 'default' || !model) return [PREVIEW_FAST, PREVIEW_ULTRAFAST];
+  return [...(catalogs.codex.find(entry => entry.id === model)?.speedTiers ?? [])];
 }
+/** Like native `tier_key`: the name lowercased, other characters than letters and digits one `-`. */
+const previewTierKey = (name: string) => name.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '');
 function emitGoal(task: Session): void { agent({ sessionId: task.id, kind: 'goal', text: '', data: structuredClone(task.goalState ?? null) }); }
 function runPreviewGoal(task: Session): void {
   window.clearTimeout(timers.get(task.id));
@@ -1383,12 +1389,12 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       task.codexSettings ??= {};
       if (request.action === 'serviceTier') {
         if (request.tier !== null && typeof request.tier !== 'string') throw new Error('Choose a valid task preference.');
-        const wanted = String(request.tier ?? '').trim().toLowerCase();
-        if (!wanted || wanted === 'default') task.codexSettings.serviceTier = null;
+        const wanted = String(request.tier ?? '').trim();
+        if (!wanted || wanted.toLowerCase() === 'default') task.codexSettings.serviceTier = null;
         else {
           const tiers = previewServiceTiers(task.model);
-          const tier = tiers.find(tier => tier.id.toLowerCase() === wanted) ?? tiers.find(tier => tier.name.toLowerCase() === wanted);
-          if (!tier) throw new Error(`${wanted[0].toUpperCase()}${wanted.slice(1)} is not available for this model in the installed Codex catalog.`);
+          const tier = tiers.find(tier => tier.key === previewTierKey(wanted)) ?? tiers.find(tier => tier.id === wanted);
+          if (!tier) throw new Error(`${wanted[0].toUpperCase()}${wanted.slice(1)} is not available for ${task.model || 'default'} in the installed Codex catalog.`);
           task.codexSettings.serviceTier = tier.id;
         }
         task.updatedAt = Date.now(); result = task; break;
