@@ -144,7 +144,22 @@ pub struct WorkerProfile {
     pub service_tier: Option<String>,
 }
 /// The speed tiers a Codex worker profile may ask for.
-pub const SERVICE_TIERS: &[&str] = &["fast", "ultrafast"];
+pub const SERVICE_TIERS: &[&str] = &crate::panda_router::SPEED_TIERS;
+pub(crate) use crate::panda_router::split_tier;
+/// A Codex `<model>@fast` / `<model>@ultrafast` slug runs `<model>` at that speed tier (a slug wins
+/// over the profile's serviceTier), so Codex never receives the slug as a model ID. Other harnesses
+/// refuse those suffixes.
+pub(crate) fn with_speed(mut profile: WorkerProfile) -> Result<WorkerProfile> {
+    let (base, Some(tier)) = split_tier(&profile.model) else {
+        return Ok(profile);
+    };
+    if profile.provider != "codex" {
+        return Err(format!("{}: only Codex models take a speed tier (@{tier}); use {base}.", profile.model));
+    }
+    profile.model = base.to_string();
+    profile.service_tier = Some(tier.to_string());
+    Ok(profile)
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TeamConfig {
@@ -517,6 +532,7 @@ fn validate_profiles(profiles: &[WorkerProfile]) -> Result<()> {
             &worker.provider,
             worker.reasoning_effort.as_deref(),
         )?;
+        with_speed(worker.clone())?;
         if let Some(tier) = &worker.service_tier {
             if worker.provider != "codex" {
                 return Err(format!("{}: only Codex workers take a speed tier.", worker.name));
@@ -792,6 +808,7 @@ fn rules(store: &Store, team: &TeamSnapshot, sid: &str) -> Result<(String, Strin
         };
         let lead = store.session(sid)?;
         let note = routing::prompt_note(&team.config, crate::model_routing::enabled());
+        let profiles = format!("{profiles}{}", if team.config.auto { routing::speed_note(&team.config) } else { String::new() });
         let staffing = if team.config.roster_only {
             let own = if note.is_empty() && team.config.workers.iter().any(|p| p.provider == lead.provider && p.model == lead.model) { ", or omit it to use your own model" } else { "" };
             format!("You lead {} with your own model ({} via {}). Use only these models for workers, never any other.{note} To pick one, set profileId to one of these entries{own}. Team: {}.", team.config.name.as_deref().map_or_else(|| "this agent team".to_string(), |name| format!("the {name} team")), lead.model, lead.provider, profiles)
@@ -2016,7 +2033,7 @@ fn dispatch_as(
                 } else {
                     staff(&team.config, &parent, &assignment)?
                 };
-                let profile = &profile;
+                let profile = &with_speed(profile)?;
                 let session = store.create_session(
                     &parent.project_id,
                     &profile.provider,
@@ -3099,11 +3116,11 @@ fn fail_over(store: &Store, team: &mut TeamSnapshot, index: usize, reason: &str)
     if routing::failed_chain(store, team, &worker.id)?.map_or(0, |c| c.attempts) >= routing::MAX_ATTEMPTS {
         return Ok(false);
     }
-    let roster = team.config.workers.iter().find(|p| p.provider == next.provider && p.model == next.model);
+    let roster = routing::roster_entry(&team.config, &next.provider, &next.model);
     let reasoning_effort = routing::effort(&next.provider, worker.reasoning_effort.as_ref()).or_else(|| roster.and_then(|p| p.reasoning_effort.clone()));
     let profile_id = roster.map_or_else(|| routing::AUTO.to_string(), |p| p.id.clone());
     // A speed tier is Codex's: another harness drops it, and the fresh session resolves it again.
-    let service_tier = roster.filter(|_| next.provider == "codex").and_then(|p| p.service_tier.clone());
+    let service_tier = roster.filter(|_| next.provider == "codex").and_then(routing::profile_tier);
     store.db.execute("UPDATE sessions SET provider=?2,model=?3,reasoning_effort=?4,resume_id=NULL,goal_state=NULL,codex_settings=NULL,context_used_tokens=NULL,context_window=NULL WHERE id=?1", params![worker.session_id, next.provider, next.model, reasoning_effort]).map_err(|e| e.to_string())?;
     let earlier = worker.error.as_deref().and_then(|e| e.find(FAILOVER).map(|i| format!(" {}", &e[i..]))).unwrap_or_default();
     let note = bounded(&format!("{FAILOVER} {} via {} failed ({}); retried on {}.{earlier}", failed.name, failed.provider, bounded(reason, 200), next.provider), 1024);

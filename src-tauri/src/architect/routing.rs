@@ -289,6 +289,17 @@ fn money(usd: f64) -> String {
     if usd < 0.01 { format!("${usd:.4}") } else { format!("${usd:.2}") }
 }
 
+/// The roster profile for a model: its own entry, else a Codex speed variant of it (`<model>@fast`).
+pub(super) fn roster_entry<'a>(config: &'a TeamConfig, provider: &str, model: &str) -> Option<&'a WorkerProfile> {
+    let entries = || config.workers.iter().filter(|p| p.provider == provider);
+    entries().find(|p| p.model == model).or_else(|| entries().find(|p| crate::panda_router::base_model(provider, &p.model) == model))
+}
+
+/// A Codex profile's speed tier: its model slug's, else its serviceTier.
+pub(super) fn profile_tier(profile: &WorkerProfile) -> Option<String> {
+    crate::panda_router::speed_tier(&profile.provider, &profile.model).map(String::from).or_else(|| profile.service_tier.clone())
+}
+
 /// A model the user has not switched off and that is not paused after failures.
 pub(super) fn usable(profile: &WorkerProfile) -> bool {
     model_routing::allowed(&profile.provider, &profile.model) && crate::model_health::is_healthy(&profile.provider, &profile.model)
@@ -308,7 +319,7 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
         Ok(AutoRoute { pick: Some(policy), ladder, mode, decided_by, failed, pinned, difficulty, category, profiler }) => {
             let opener = opening_rung(pinned.as_ref(), &failed, mode, &ladder);
             let pick = opener.cloned().unwrap_or_else(|| policy.clone());
-            let roster = config.workers.iter().find(|p| p.provider == pick.provider && p.model == pick.model);
+            let roster = roster_entry(config, &pick.provider, &pick.model);
             if config.roster_only && roster.is_none() {
                 return Err("Panda Router picked a model outside this team.".into());
             }
@@ -335,8 +346,8 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
                 provider: pick.provider,
                 model: pick.model,
                 reasoning_effort,
-                // Only a matched roster profile carries a speed tier.
-                service_tier: roster.and_then(|p| p.service_tier.clone()),
+                // Only a matched roster profile carries a speed tier: routing never picks one itself.
+                service_tier: roster.and_then(profile_tier),
             };
             return Ok((profile, note));
         }
@@ -411,8 +422,10 @@ pub(super) fn route_request(config: &TeamConfig, langs: &[String], args: Value) 
             .failed
             .into_iter()
             .map(|f| {
-                let name = pool.iter().find(|m| m.provider == f.provider && m.model == f.model).map_or_else(|| f.model.clone(), |m| m.name.clone());
-                PoolModel { provider: f.provider, model: f.model, name }
+                // A failed speed variant failed its model.
+                let model = crate::panda_router::base_model(&f.provider, &f.model).to_string();
+                let name = pool.iter().find(|m| m.provider == f.provider && m.model == model).map_or_else(|| model.clone(), |m| m.name.clone());
+                PoolModel { provider: f.provider, model, name }
             })
             .collect();
         jobs.push(job(&task.text, task.files.unwrap_or(0) as usize, langs, failed));
@@ -420,15 +433,64 @@ pub(super) fn route_request(config: &TeamConfig, langs: &[String], args: Value) 
     Ok((pool, jobs, args.mode))
 }
 
+/// One sentence for the lead naming the team's usable Codex speed variants (at most 8); empty without any.
+pub(super) fn speed_note(config: &TeamConfig) -> String {
+    let catalog = if config.roster_only { &[][..] } else { &config.catalog[..] };
+    let mut slugs: Vec<&str> = Vec::new();
+    for p in config.workers.iter().chain(catalog) {
+        if crate::panda_router::speed_tier(&p.provider, &p.model).is_some() && usable(p) && !slugs.contains(&p.model.as_str()) {
+            slugs.push(&p.model);
+        }
+    }
+    if slugs.is_empty() {
+        return String::new();
+    }
+    let more = if slugs.len() > 8 { ", …" } else { "" };
+    slugs.truncate(8);
+    format!(" Codex speed variants (provider codex, model <model>@fast or @ultrafast: faster, 2-3x usage; routing never picks them, so name one only when speed matters or the user asks): {}{more}", slugs.join(", "))
+}
+
+/// Usage multiplier of a Codex speed tier over the default speed (est.: Codex lists no prices).
+pub(super) fn speed_cost(tier: &str) -> f64 {
+    if tier == "ultrafast" { 3.0 } else { 2.0 }
+}
+
+/// The usable Codex speed variants (`<model>@fast`, …) the team's models list for a model: slug and tier.
+pub(super) fn speed_variants(config: &TeamConfig, provider: &str, model: &str) -> Vec<(String, &'static str)> {
+    if provider != "codex" {
+        return Vec::new();
+    }
+    let mut out: Vec<(String, &'static str)> = Vec::new();
+    // A named team offers only its own entries.
+    let catalog = if config.roster_only { &[][..] } else { &config.catalog[..] };
+    for p in config.workers.iter().chain(catalog).filter(|p| p.provider == provider) {
+        if let (base, Some(tier)) = super::split_tier(&p.model) {
+            if base == model && usable(p) && !out.iter().any(|(_, t)| *t == tier) {
+                out.push((format!("{base}@{tier}"), tier));
+            }
+        }
+    }
+    out
+}
+
 /// Compact route_models output: pick and why, up to 3 alternatives, the first 4 rungs of the
 /// escalation ladder, difficulty, category, unrated count, and which profiler ran ("heuristic" while
 /// the ONNX profiler downloads). Past `PAGE_BYTES` every task drops its alternatives and ladder
 /// (`trimmed`), and tasks that still do not fit are left out, last first (`omittedTasks`).
 pub(super) fn route_summary(config: &TeamConfig, routes: &[Route]) -> Value {
+    let usd = |x: f64| (x * 10000.0).round() / 10000.0;
     let model = |m: &Routed| {
-        let mut entry = json!({"provider":m.provider,"model":m.model,"name":m.name,"pSuccess":(m.p_success * 100.0).round() / 100.0,"estCostUsd":(m.est_cost_usd * 10000.0).round() / 10000.0});
+        let mut entry = json!({"provider":m.provider,"model":m.model,"name":m.name,"pSuccess":(m.p_success * 100.0).round() / 100.0,"estCostUsd":usd(m.est_cost_usd)});
         if let Some(p) = config.workers.iter().find(|p| p.provider == m.provider && p.model == m.model) {
             entry["profileId"] = json!(p.id);
+        }
+        // Speed variants the lead may name (routing never picks them): the model's own P, faster, more usage.
+        let speeds: serde_json::Map<String, Value> = speed_variants(config, &m.provider, &m.model)
+            .into_iter()
+            .map(|(slug, tier)| (slug, json!(usd(m.est_cost_usd * speed_cost(tier)))))
+            .collect();
+        if !speeds.is_empty() {
+            entry["speedEstCostUsd"] = Value::Object(speeds);
         }
         if let Some(tier) = m.tier {
             entry["tier"] = json!(tier);

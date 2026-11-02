@@ -532,6 +532,20 @@ pub struct ModelInfo {
     pub reasoning_efforts: Vec<ReasoningEffortInfo>,
     pub default_reasoning_effort: Option<String>,
     pub context_window: Option<u64>,
+    /// Codex only: the speed tiers (`fast`, `ultrafast`) its catalog lists, which teams offer as
+    /// `<model>@fast` / `<model>@ultrafast` variants.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub speed_tiers: Vec<String>,
+}
+
+/// The speed tiers (`fast`, `ultrafast`) a Codex catalog entry offers, by tier id or name (Fast is id `priority`).
+fn codex_speed_tiers(entry: &Value) -> Vec<String> {
+    let tiers = crate::command_operations::catalog_tiers(entry);
+    crate::panda_router::SPEED_TIERS
+        .iter()
+        .filter(|wanted| tiers.iter().any(|t| t.id.eq_ignore_ascii_case(wanted) || t.name.eq_ignore_ascii_case(wanted)))
+        .map(|t| t.to_string())
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -595,6 +609,7 @@ impl ModelInfo {
             reasoning_efforts: Vec::new(),
             default_reasoning_effort: None,
             context_window: None,
+            speed_tiers: Vec::new(),
         }
     }
 }
@@ -864,6 +879,7 @@ fn selected_opencode_models(catalog: Vec<ModelInfo>, selected: &[String]) -> Vec
     let mut models = vec![ModelInfo::default_choice()];
     for id in selected {
         models.push(available.remove(id).unwrap_or_else(|| ModelInfo {
+            speed_tiers: Vec::new(),
             id: id.clone(),
             name: id.clone(),
             description: "Saved OpenCode model".into(),
@@ -961,6 +977,7 @@ fn parse_opencode_v2_models(bytes: &[u8]) -> Result<Vec<ModelInfo>, String> {
                 return Err(INVALID.to_owned());
             }
             Ok(ModelInfo {
+                speed_tiers: Vec::new(),
                 name: model_text(entry["name"].as_str(), &id, 160),
                 description: id.clone(),
                 // The API lists variants least to most, unlike v1's sorted keys.
@@ -1085,6 +1102,7 @@ fn parse_codex_models(result: &Value) -> Result<Vec<ModelInfo>, String> {
                     .filter(|id| efforts.iter().any(|effort| effort.id == *id))
                     .map(str::to_owned);
                 models.push(ModelInfo {
+                    speed_tiers: codex_speed_tiers(entry),
                     id: model.into(),
                     name: model_text(
                         entry["displayName"]
@@ -1166,6 +1184,7 @@ fn parse_claude_models(result: &Value) -> Result<Vec<ModelInfo>, String> {
             continue;
         }
         let model = ModelInfo {
+            speed_tiers: Vec::new(),
             id: id.into(),
             name: claude_model_name(entry, id),
             description: model_text(entry["description"].as_str(), "", 1000),
@@ -3904,6 +3923,7 @@ mod tests {
     #[test]
     fn opencode_choices_keep_only_saved_models_and_retain_unavailable_ids() {
         let model = super::ModelInfo {
+            speed_tiers: Vec::new(),
             id: "vendor/selected".into(),
             name: "Selected model".into(),
             description: "Provider metadata".into(),
@@ -3912,6 +3932,7 @@ mod tests {
             context_window: Some(200_000),
         };
         let unused = super::ModelInfo {
+            speed_tiers: Vec::new(),
             id: "vendor/not-selected".into(),
             ..model.clone()
         };
@@ -5050,6 +5071,22 @@ mod tests {
         assert_eq!(models[1].name, "Actual Model 2");
         assert_eq!(models[1].description, "Provider description");
         assert_eq!(models[2].name, "Legacy Model");
+    }
+
+    #[test]
+    fn model_catalog_lists_the_speed_tiers_teams_offer_as_variants() {
+        let models = parse_codex_models(&json!({"data":[
+            {"model":"sol","serviceTiers":[{"id":"priority","name":"Fast"},{"id":"ultrafast","name":"Ultrafast"},{"id":"flex","name":"Flex"}]},
+            {"model":"luna","serviceTiers":[{"id":"priority","name":"Fast"}]},
+            {"model":"plain","serviceTiers":[]},
+            {"model":"old"}
+        ]}))
+        .unwrap();
+        let tiers: Vec<(&str, Vec<&str>)> = models.iter().map(|m| (m.id.as_str(), m.speed_tiers.iter().map(String::as_str).collect())).collect();
+        assert_eq!(tiers, [("default", vec![]), ("sol", vec!["fast", "ultrafast"]), ("luna", vec!["fast"]), ("plain", vec![]), ("old", vec![])]);
+        // Sent to the window only when there are any.
+        assert_eq!(serde_json::to_value(&models[1]).unwrap()["speedTiers"], json!(["fast", "ultrafast"]));
+        assert!(serde_json::to_value(&models[3]).unwrap().get("speedTiers").is_none());
     }
 
     #[test]

@@ -43,8 +43,10 @@ with that tier, which it keeps for follow-ups. If the model does not offer the
 tier, or the catalog cannot be read, the worker starts at the default speed and
 the lead sees one short note about it with the worker's result; the assignment
 never fails for it. Workers routed with `profileId: "auto"` or given a provider
-and model directly get a speed only from the matching roster profile, and a
-failover to another harness drops it.
+and model directly get a speed only from the matching roster profile or from a
+`<model>@fast` / `<model>@ultrafast` model slug (see
+[model-routing.md](model-routing.md#codex-fast-and-ultrafast)), and a failover to
+another harness drops it.
 
 ## Model routing
 

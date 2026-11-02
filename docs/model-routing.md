@@ -139,6 +139,33 @@ one row per key in pool order, named after its first entry without the trailing
   name list their harnesses (their key when those match too). A ranked model that leaves the set keeps its tier, unshown.
 - When you name models in your message, the lead uses those.
 
+### Codex Fast and Ultrafast
+
+A Codex speed tier can be named as part of the model: `gpt-6.1-sol@fast` or
+`gpt-6.1-sol@ultrafast`. `split_tier` in `src-tauri/src/panda_router.rs` is the one
+parser; any other suffix is part of the model ID, and other harnesses refuse these
+two. The lead can dispatch `provider: "codex", model: "<model>@ultrafast"`, and a
+roster or named-team entry may use a slug too. The worker runs the plain model, and
+the tier goes through the per-worker speed path in
+[architect-workers.md](architect-workers.md): it is looked up in the model's Codex
+catalog at launch, and a model without it starts at the default speed with a short
+note. When a slug and a profile's `serviceTier` disagree, the slug wins.
+
+When a team turns on, Codex models whose installed catalog lists Fast or Ultrafast
+(`speedTiers` on the model list) get `<model>@fast` / `<model>@ultrafast` entries in
+the team catalog, after every model, so the 1000-entry cap never drops a model for
+them. Routing never picks a variant on its own: `pool_from` folds each variant
+into its model, so `auto` staffs the plain model unless a roster entry carries a
+tier. `route_models` lists a model's variants beside it as `speedEstCostUsd`, at
+an estimated 2x (Fast) or 3x (Ultrafast) of its cost, since Codex publishes no
+prices. The lead's team rules name the usable variants in one sentence and say
+to use them only when speed matters or you ask for it.
+
+A variant is its model everywhere else. Excluding the model in Settings excludes
+its variants, and a variant slug can also be excluded on its own. Pausing the
+model after failures pauses its variants, and failures are recorded against the
+model. In an escalation chain, a failed `gpt-6.1-sol@fast` counts as `gpt-6.1-sol`.
+
 ## Privacy
 
 The profiler files — `model.int8.onnx` (31 MB) and `tokenizer.json` (3.5 MB) — are
