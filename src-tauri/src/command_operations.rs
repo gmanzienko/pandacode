@@ -835,7 +835,7 @@ pub async fn resolved_model(cwd: &Path, model: &str) -> Result<String, String> {
     nonempty(&item["model"], 200).ok_or_else(|| "Codex did not return the model identifier.".into())
 }
 
-fn catalog_tiers(item: &Value) -> Vec<ServiceTier> {
+pub(crate) fn catalog_tiers(item: &Value) -> Vec<ServiceTier> {
     let text = |value: &Value, limit: usize| {
         value
             .as_str()

@@ -647,9 +647,20 @@ pub struct ModelInfo {
     pub reasoning_efforts: Vec<ReasoningEffortInfo>,
     pub default_reasoning_effort: Option<String>,
     pub context_window: Option<u64>,
-    /// Faster service tiers beyond the standard speed (Codex `serviceTiers`, Claude fast mode).
+    /// Codex only: the speed tiers (`fast`, `ultrafast`) its catalog lists, which teams offer as
+    /// `<model>@fast` / `<model>@ultrafast` variants.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub speed_tiers: Vec<ReasoningEffortInfo>,
+    pub speed_tiers: Vec<String>,
+}
+
+/// The speed tiers (`fast`, `ultrafast`) a Codex catalog entry offers, by tier id or name (Fast is id `priority`).
+fn codex_speed_tiers(entry: &Value) -> Vec<String> {
+    let tiers = crate::command_operations::catalog_tiers(entry);
+    crate::panda_router::SPEED_TIERS
+        .iter()
+        .filter(|wanted| tiers.iter().any(|t| t.id.eq_ignore_ascii_case(wanted) || t.name.eq_ignore_ascii_case(wanted)))
+        .map(|t| t.to_string())
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -1325,6 +1336,7 @@ fn parse_codex_models(result: &Value) -> Result<Vec<ModelInfo>, String> {
                     .filter(|id| efforts.iter().any(|effort| effort.id == *id))
                     .map(str::to_owned);
                 models.push(ModelInfo {
+                    speed_tiers: codex_speed_tiers(entry),
                     id: model.into(),
                     name: model_text(
                         entry["displayName"]
@@ -1338,7 +1350,6 @@ fn parse_codex_models(result: &Value) -> Result<Vec<ModelInfo>, String> {
                     default_reasoning_effort: default_effort,
                     // model/list does not report the effective window. Live usage does.
                     context_window: None,
-                    speed_tiers: codex_speed_tiers(&entry["serviceTiers"]),
                 });
             }
         }
@@ -1347,7 +1358,7 @@ fn parse_codex_models(result: &Value) -> Result<Vec<ModelInfo>, String> {
 }
 
 /// Every tier Codex reports, so new ones (Ultra Fast) appear without a release.
-fn codex_speed_tiers(tiers: &Value) -> Vec<ReasoningEffortInfo> {
+fn picker_speed_tiers(tiers: &Value) -> Vec<ReasoningEffortInfo> {
     let mut found: Vec<ReasoningEffortInfo> = Vec::new();
     for tier in tiers.as_array().into_iter().flatten().take(8) {
         let Some(id) = tier["id"].as_str().filter(|id| valid_service_tier(id)) else { continue };
@@ -5787,6 +5798,22 @@ mod tests {
         for (provider, settings) in [("claude", None), ("claude", Some(json!({"serviceTier":null}))), ("glm", Some(json!({"serviceTier":"fast"})))] {
             assert!(!args(provider, settings).iter().any(|arg| arg == "--settings"));
         }
+    }
+
+    #[test]
+    fn model_catalog_lists_the_speed_tiers_teams_offer_as_variants() {
+        let models = parse_codex_models(&json!({"data":[
+            {"model":"sol","serviceTiers":[{"id":"priority","name":"Fast"},{"id":"ultrafast","name":"Ultrafast"},{"id":"flex","name":"Flex"}]},
+            {"model":"luna","serviceTiers":[{"id":"priority","name":"Fast"}]},
+            {"model":"plain","serviceTiers":[]},
+            {"model":"old"}
+        ]}))
+        .unwrap();
+        let tiers: Vec<(&str, Vec<&str>)> = models.iter().map(|m| (m.id.as_str(), m.speed_tiers.iter().map(String::as_str).collect())).collect();
+        assert_eq!(tiers, [("default", vec![]), ("sol", vec!["fast", "ultrafast"]), ("luna", vec!["fast"]), ("plain", vec![]), ("old", vec![])]);
+        // Sent to the window only when there are any.
+        assert_eq!(serde_json::to_value(&models[1]).unwrap()["speedTiers"], json!(["fast", "ultrafast"]));
+        assert!(serde_json::to_value(&models[3]).unwrap().get("speedTiers").is_none());
     }
 
     #[test]
