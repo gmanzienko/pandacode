@@ -2470,8 +2470,17 @@ fn heuristic_routes(store: &Store, team: &TeamSnapshot, args: &Value, enabled: b
     let config = &team.config;
     let (keys, jobs) = routing::auto_jobs(args, &["rust".to_string()], &routing::chains(store, team, args).unwrap(), enabled);
     let prefs = crate::panda_router::Preferences { mode, ..Default::default() };
-    let routes = enabled.then(|| crate::model_routing::route_with(&crate::panda_router::Router::heuristic(), &prefs, &routing::pool(config), jobs));
-    routing::auto_from(keys, routes, mode)
+    if !enabled {
+        return routing::auto_from(keys, None, mode);
+    }
+    // As production does: a replacement that keeps a speed tier routes over Codex models that list it.
+    let speeds = TEST_SPEEDS.with(|s| s.borrow().clone());
+    let mut routes = routing::AutoRoutes::default();
+    for (keys, pool, jobs) in routing::tier_groups(config, keys, jobs, &routing::replaced_tiers(team, args), &speeds) {
+        let routed = crate::model_routing::route_with(&crate::panda_router::Router::heuristic(), &prefs, &pool, jobs);
+        routes.extend(routing::auto_from(keys, Some(routed), mode));
+    }
+    routes
 }
 fn routed_call(state: &AppState, sid: &str, args: Value, enabled: bool) -> Result<Value> {
     routed_call_in(state, sid, args, enabled, Mode::Balanced)
@@ -3603,7 +3612,7 @@ fn routing_never_picks_a_speed_variant_but_route_models_and_the_lead_see_them() 
     let team = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
     assert_eq!(team.workers.len(), 9);
     assert!(team.workers.iter().all(|w| w.service_tier.is_none() && !w.model.contains('@')), "{:?}", team.workers.iter().map(|w| (&w.model, &w.service_tier)).collect::<Vec<_>>());
-    // route_models lists them beside their model at its own cost, marked unpriced.
+    // route_models lists them beside their model at its own cost, marked as extra usage.
     let (pool, jobs, _) = routing::route_request(&config, &[], json!({"tasks":[{"text":"Write unit tests for the date parser."}],"mode":"quality"})).unwrap();
     let solo: Vec<_> = pool.into_iter().filter(|m| m.model == "gpt-6-luna").collect();
     let routes = crate::model_routing::route_with(&crate::panda_router::Router::heuristic(), &Default::default(), &solo, jobs).unwrap();
@@ -3611,13 +3620,13 @@ fn routing_never_picks_a_speed_variant_but_route_models_and_the_lead_see_them() 
     let luna = &out["tasks"][0]["pick"];
     assert_eq!(luna["model"], "gpt-6-luna", "{out}");
     assert_eq!(luna["speedVariants"], json!([
-        {"model":"gpt-6-luna@fast","estCostUsd":luna["estCostUsd"],"cost":"extra usage, unpriced"},
-        {"model":"gpt-6-luna@ultrafast","estCostUsd":luna["estCostUsd"],"cost":"extra usage, unpriced"},
+        {"model":"gpt-6-luna@fast","estCostUsd":luna["estCostUsd"],"cost":"extra usage"},
+        {"model":"gpt-6-luna@ultrafast","estCostUsd":luna["estCostUsd"],"cost":"extra usage"},
     ]));
     // The fictional tier is a variant like any other.
     assert_eq!(routing::speed_variants(&config, "codex", "nova-9"), ["nova-9@turbo-max"]);
     let note = routing::speed_note(&config);
-    assert!(note.contains("gpt-6-luna@fast, gpt-6-luna@ultrafast, nova-9@turbo-max") && note.contains("extra usage, unpriced") && note.contains("routing never picks them"), "{note}");
+    assert!(note.contains("gpt-6-luna@fast, gpt-6-luna@ultrafast, nova-9@turbo-max") && note.contains("faster, extra usage;") && !note.contains("unpriced") && note.contains("routing never picks them"), "{note}");
     assert!(!note.contains("2-3x"));
     assert!(routing::speed_note(&super::tests::config()).is_empty());
     // A switched-off variant is not offered.
@@ -3672,4 +3681,159 @@ fn a_failed_speed_variant_counts_as_its_model_when_escalating() {
     // route_models' failed list takes a slug the same way.
     let (_, jobs, _) = routing::route_request(&team.config, &[], json!({"tasks":[{"text":"x","failed":[{"provider":"codex","model":"gpt-6-luna@fast"}]}]})).unwrap();
     assert_eq!((jobs[0].failed[0].model.as_str(), jobs[0].failed[0].name.as_str()), ("gpt-6-luna", "GPT-6 Luna · Codex"));
+}
+#[test]
+fn every_launch_of_a_tiered_worker_checks_its_tier_again() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.config.workers[0].service_tier = Some("ultrafast".into());
+        save(&store, &mut team).unwrap();
+    }
+    let first = with_speeds(speeds(), || call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[assignment("one","fast","src/a")]}))).unwrap();
+    let id = first["workerIds"][0].as_str().unwrap().to_string();
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let worker_sid = action.sid.clone();
+    {
+        let store = state.store.lock().unwrap();
+        let (_, model, key) = speed_request(&store, &action.admission, &worker_sid).unwrap().unwrap();
+        apply_speed(&store, &worker_sid, &model, &key, Ok(speed_catalog()["default"].clone())).unwrap();
+        assert_eq!(store.session(&worker_sid).unwrap().codex_settings, Some(json!({"serviceTier":"ultrafast"})));
+        // The run's own check knows the worker's tier; the lead and other tasks have none.
+        assert_eq!(required_tier(&store, &worker_sid).unwrap().as_deref(), Some("ultrafast"));
+        assert_eq!(required_tier(&store, &sid).unwrap(), None);
+        // A resume finds the saved id and still checks the live catalog again.
+        assert!(speed_request(&store, &action.admission, &worker_sid).unwrap().is_some());
+    }
+    let (run, _rx) = claim(&state, action);
+    finish(&state, &run, "Done.", true);
+    // The run saved a null tier (as a plain task's fallback would): a follow-up still enforces the profile's tier.
+    state.store.lock().unwrap().db.execute("UPDATE sessions SET codex_settings='{\"serviceTier\":null}' WHERE id=?1", [&worker_sid]).unwrap();
+    let review = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (reviewer, _review_rx) = claim(&state, review);
+    call(&state, &sid, "pandacode_followup_worker", json!({"workerId":id,"key":"more","prompt":"Handle the empty input case."})).unwrap();
+    finish(&state, &reviewer, "Follow up.", true);
+    let retry = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    assert_eq!(retry.sid, worker_sid);
+    let store = state.store.lock().unwrap();
+    let (_, model, key) = speed_request(&store, &retry.admission, &worker_sid).unwrap().unwrap();
+    assert_eq!((model.as_str(), key.as_str()), ("default", "ultrafast"));
+    // The tier left the catalog meanwhile: this launch fails with the reason, never at the default speed.
+    let error = apply_speed(&store, &worker_sid, &model, &key, Ok(vec![tier("priority", "Fast")])).unwrap_err();
+    assert_eq!(error, "Ultrafast is not available for default in the installed Codex catalog.");
+    assert_eq!(store.session(&worker_sid).unwrap().codex_settings, Some(json!({"serviceTier":null})));
+    drop(store);
+    fail_launch_state(&state, &retry.admission, &worker_sid, &error, &mut |_| {});
+    let team = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    let worker = team.workers.iter().find(|w| w.session_id == worker_sid).unwrap();
+    assert_eq!((worker.status.as_str(), worker.error.as_deref()), ("failed", Some("Could not start: Ultrafast is not available for default in the installed Codex catalog.")));
+}
+#[test]
+fn a_tiered_worker_moved_off_codex_cannot_launch() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.config.workers[0].service_tier = Some("fast".into());
+        save(&store, &mut team).unwrap();
+    }
+    with_speeds(speeds(), || call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[assignment("one","fast","src/a")]}))).unwrap();
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let store = state.store.lock().unwrap();
+    store.db.execute("UPDATE sessions SET provider='opencode' WHERE id=?1", [&action.sid]).unwrap();
+    assert_eq!(speed_request(&store, &action.admission, &action.sid).unwrap_err(), "This worker must run at its Fast speed tier, which only Codex runs.");
+}
+/// A catalog with three rated Codex models: two list Ultrafast, one only Fast.
+fn replacement_state() -> (AppState, String, String) {
+    let (state, sid) = auto_state();
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.config.catalog = [routing_catalog(), vec![profile("codex-terra", "codex", "gpt-5.6-terra", "GPT-5.6 Terra · Codex"), profile("codex-luna56", "codex", "gpt-5.6-luna", "GPT-5.6 Luna · Codex")]].concat();
+        save(&store, &mut team).unwrap();
+    }
+    let first = with_speeds(replacement_speeds(), || call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[auto_assignment("v1", json!({"provider":"codex","model":"gpt-6-luna@ultrafast"}))]}))).unwrap();
+    let id = first["workerIds"][0].as_str().unwrap().to_string();
+    let store = state.store.lock().unwrap();
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    team.workers[0].status = "completed".into();
+    save(&store, &mut team).unwrap();
+    drop(store);
+    (state, sid, id)
+}
+fn replacement_speeds() -> SpeedCatalog {
+    let (fast, ultra) = (tier("priority", "Fast"), tier("ultrafast", "Ultrafast"));
+    Some(Ok([("gpt-6-luna", vec![fast.clone(), ultra.clone()]), ("gpt-5.6-terra", vec![fast.clone(), ultra]), ("gpt-5.6-luna", vec![fast])].into_iter().map(|(m, t)| (m.to_string(), t)).collect()))
+}
+#[test]
+fn a_replacement_keeps_the_replaced_workers_speed_tier_or_is_refused() {
+    let (state, sid, id) = replacement_state();
+    let replace = |extra: Value| {
+        let mut assignment = auto_assignment("v2", extra);
+        assignment["replaces"] = json!(id);
+        with_speeds(replacement_speeds(), || routed_call(&state, &sid, json!({"assignments":[assignment]}), true))
+    };
+    // Another harness, or a Codex model whose catalog lacks the tier: refused, never staffed untiered.
+    let error = replace(json!({"provider":"claude","model":"opus"})).unwrap_err();
+    assert!(error.contains("ran at the Ultrafast speed tier, so its replacement must too, and only Codex runs it"), "{error}");
+    let error = replace(json!({"provider":"codex","model":"gpt-5.6-luna"})).unwrap_err();
+    assert_eq!(error, "v1 ran at the Ultrafast speed tier, so its replacement must too: Ultrafast is not available for gpt-5.6-luna in the installed Codex catalog.");
+    assert_eq!(load(&state.store.lock().unwrap(), &sid).unwrap().unwrap().workers.len(), 1);
+    // `auto` routes only over Codex models whose catalog lists the tier, and keeps it.
+    replace(json!({"profileId":"auto"})).unwrap();
+    let team = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    let worker = &team.workers[1];
+    assert_eq!((worker.provider.as_str(), worker.service_tier.as_deref()), ("codex", Some("ultrafast")), "{}", worker.model);
+    assert!(["gpt-6-luna", "gpt-5.6-terra"].contains(&worker.model.as_str()), "{}", worker.model);
+    let speeds = replacement_speeds();
+    let pool = routing::pool_for(&team.config, Some("ultrafast"), &speeds);
+    assert_eq!(pool.iter().map(|m| m.model.as_str()).collect::<Vec<_>>(), ["gpt-6-luna", "gpt-5.6-terra"]);
+    assert!(routing::pool_for(&team.config, Some("ultrafast"), &Some(Err("no catalog".into()))).is_empty());
+}
+#[test]
+fn a_replacement_may_name_its_own_tier_or_a_compatible_codex_model() {
+    let (state, sid, id) = replacement_state();
+    let replace = |key: &str, extra: Value| {
+        let mut assignment = auto_assignment(key, extra);
+        assignment["replaces"] = json!(id);
+        with_speeds(replacement_speeds(), || routed_call(&state, &sid, json!({"assignments":[assignment]}), true))
+    };
+    // A compatible Codex model keeps the inherited tier.
+    replace("v2", json!({"provider":"codex","model":"gpt-5.6-terra"})).unwrap();
+    let team = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    assert_eq!((team.workers[1].model.as_str(), team.workers[1].service_tier.as_deref()), ("gpt-5.6-terra", Some("ultrafast")));
+    // Its own slug names its own tier.
+    let (state, sid, id) = replacement_state();
+    let mut assignment = auto_assignment("v3", json!({"provider":"codex","model":"gpt-5.6-luna@fast"}));
+    assignment["replaces"] = json!(id);
+    with_speeds(replacement_speeds(), || routed_call(&state, &sid, json!({"assignments":[assignment]}), true)).unwrap();
+    let team = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    assert_eq!((team.workers[1].model.as_str(), team.workers[1].service_tier.as_deref()), ("gpt-5.6-luna", Some("fast")));
+}
+#[test]
+fn routing_off_keeps_the_lead_models_roster_tier() {
+    let (state, sid) = auto_state();
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute("UPDATE sessions SET provider='codex', model='gpt-6-luna', reasoning_effort=NULL WHERE id=?1", [&sid]).unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        let mut roster = profile("luna", "codex", "gpt-6-luna", "Luna");
+        roster.service_tier = Some("fast".into());
+        team.config.workers.push(roster);
+        save(&store, &mut team).unwrap();
+    }
+    let result = with_speeds(speeds(), || routed_call(&state, &sid, json!({"assignments":[auto_assignment("off", json!({"profileId":"auto"}))]}), false)).unwrap();
+    assert!(result["routing"][0].as_str().unwrap().contains("not routed (routing is off)"), "{result}");
+    let worker = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap().workers[0].clone();
+    assert_eq!((worker.provider.as_str(), worker.model.as_str(), worker.service_tier.as_deref()), ("codex", "gpt-6-luna", Some("fast")));
+    // Validated like any other: a tier the lead's model lacks is refused.
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.config.workers.last_mut().unwrap().service_tier = Some("ultrafast".into());
+        save(&store, &mut team).unwrap();
+    }
+    let error = with_speeds(speeds(), || routed_call(&state, &sid, json!({"assignments":[auto_assignment("off2", json!({"profileId":"auto"}))]}), false)).unwrap_err();
+    assert_eq!(error, "Ultrafast is not available for gpt-6-luna in the installed Codex catalog.");
 }

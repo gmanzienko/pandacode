@@ -150,6 +150,9 @@ pub struct RunConfig {
     pub goal: Option<crate::goal_state::GoalRequest>,
     /// Validated per-task settings applied before any new Codex turn.
     pub codex_settings: Option<Value>,
+    /// A team worker's required Codex speed tier key: the run refuses to go on without it
+    /// rather than fall back to the model's default speed. None for every other task.
+    pub required_tier: Option<String>,
     /// Only native-validated, managed screenshot paths; never arbitrary web content.
     pub images: Vec<PathBuf>,
 }
@@ -3818,6 +3821,7 @@ mod tests {
 
     pub(super) fn config(provider: &str) -> RunConfig {
         RunConfig {
+            required_tier: None,
             session_id: "local".into(),
             provider: provider.into(),
             model: "default".into(),
@@ -5442,6 +5446,7 @@ read -r a; echo '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}
                 "What exact token did you reply in your preceding answer? Reply only with that token. Do not use tools or modify files."
             };
             let cfg = RunConfig {
+                required_tier: None,
                 session_id: format!("smoke-{provider}"),
                 provider: provider.clone(),
                 model: model.clone(),

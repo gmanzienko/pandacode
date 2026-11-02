@@ -173,7 +173,7 @@ export function mountArchitectSetup(host: HTMLElement, options: SetupOptions): S
     apply: setup => {
       if (!team && task.resumeId && setup.architect.provider !== task.provider) throw new Error('Use a new task to switch the architect harness.');
       picker?.(); Object.assign(config, structuredClone(setup.config)); Object.assign(architect, structuredClone(setup.architect));
-      renderProfiles(); refreshModelLabels();
+      renderProfiles(); refreshModelLabels(new Set());
       for (const name of ['maxRounds', 'maxAssignments', 'summaryLimit'] as const) (form.elements.namedItem(name) as HTMLInputElement).value = String(config[name]);
       guidanceField.value = config.leadGuidance ?? '';
       parallel.value = String(config.maxParallel || 3); refreshParallel();
@@ -217,19 +217,26 @@ export function mountArchitectSetup(host: HTMLElement, options: SetupOptions): S
     return `<select class="architect-speed" aria-label="Speed for worker ${index + 1}" ${options ? '' : 'hidden'}>${options}</select>`;
   }
   renderProfiles();
-  function refreshModelLabels(): void {
+  /** `loaded`: harnesses whose live catalog just arrived, whose Speed choices now follow it. */
+  function refreshModelLabels(loaded: ReadonlySet<ProviderId>): void {
     if (disposed) return;
     host.querySelector<HTMLButtonElement>('.architect-model')!.innerHTML = modelMarkup(architect, providers);
     profiles.querySelectorAll<HTMLElement>('.architect-profile').forEach(row => {
       const profile = config.workers.find(profile => profile.id === row.dataset.profileId);
       if (!profile) return;
       row.querySelector<HTMLElement>('.architect-model')!.innerHTML = modelMarkup(profile, providers);
-      // Catalogs that arrived since: the Speed choices follow them (a saved tier is kept until the model changes).
-      const speed = row.querySelector<HTMLSelectElement>('.architect-speed');
-      if (speed) { speed.innerHTML = speedOptions(modelSpeedTiers(providers, profile.provider, profile.model), profile.serviceTier); speed.hidden = !speed.innerHTML; }
+      // A live catalog that arrived since decides: a saved tier it lacks leaves the selection and is
+      // named only in the row's note.
+      const speed = row.querySelector<HTMLSelectElement>('.architect-speed'), note = row.querySelector<HTMLElement>('.architect-speed-note');
+      if (!speed || !loaded.has(profile.provider)) return;
+      const tiers = modelSpeedTiers(providers, profile.provider, profile.model), kept = keepSpeed(profile.serviceTier, tiers, profile.model);
+      if (kept.tier) profile.serviceTier = kept.tier; else delete profile.serviceTier;
+      speed.innerHTML = speedOptions(tiers, kept.tier); speed.hidden = !speed.innerHTML;
+      if (note && kept.note) { note.textContent = kept.note; note.hidden = false; }
     });
   }
-  void Promise.allSettled([...new Set(providers.filter(p => p.installed).map(p => p.id))].map(options.loadModels)).then(refreshModelLabels);
+  const installed = [...new Set(providers.filter(p => p.installed).map(p => p.id))];
+  void Promise.allSettled(installed.map(options.loadModels)).then(results => refreshModelLabels(new Set(installed.filter((_, index) => results[index].status === 'fulfilled'))));
   host.querySelector<HTMLButtonElement>('.architect-model')!.addEventListener('click', event => choose(event.currentTarget as HTMLButtonElement, architect, Boolean(team) || !task.resumeId));
   host.querySelector('.architect-add')!.addEventListener('click', () => {
     picker?.(); config.workers.push({ ...config.workers[config.workers.length - 1], id: crypto.randomUUID(), name: `Worker ${config.workers.length + 1}` }); renderProfiles(); savedProfiles.changed();

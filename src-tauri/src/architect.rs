@@ -129,6 +129,16 @@ pub(crate) fn resolve_speed(mut profile: WorkerProfile, speeds: &SpeedCatalog) -
     profile.service_tier = Some(tier.key.clone());
     Ok(profile)
 }
+/// A replacement for a worker that ran at a speed tier runs at it too: only a Codex model whose live
+/// catalog lists the tier can take it, and anything else is refused, never staffed at the default.
+fn inherit_speed(mut profile: WorkerProfile, old: &str, tier: &str, speeds: &SpeedCatalog) -> Result<WorkerProfile> {
+    let label = codex_ops::tier_label(tier);
+    if profile.provider != "codex" {
+        return Err(format!("{old} ran at the {label} speed tier, so its replacement must too, and only Codex runs it; {} via {} cannot. Name a Codex model whose catalog lists {label}.", profile.model, profile.provider));
+    }
+    profile.service_tier = Some(tier.to_string());
+    resolve_speed(profile, speeds).map_err(|e| format!("{old} ran at the {label} speed tier, so its replacement must too: {e}"))
+}
 /// Whether a Codex profile asks for a speed tier (a slug or `serviceTier`).
 pub(crate) fn wants_speed(profile: &WorkerProfile) -> bool {
     profile.provider == "codex" && (profile.service_tier.is_some() || split_tier(&profile.model).1.is_some())
@@ -1341,19 +1351,19 @@ pub fn host(
                     Ok(result)
                 } else {
                     let mut result = if name == "pandacode_route_models" {
-                        let (config, langs, _) = routing::team_context(&app, &sid, generation, &json!({})).await?;
+                        let (config, langs, _, _) = routing::team_context(&app, &sid, generation, &json!({})).await?;
                         routing::route_models(&config, &langs, args).await?
                     } else {
-                        let routes = if name == "pandacode_dispatch_workers" && routing::has_auto(&args, crate::model_routing::enabled()) {
-                            let (config, langs, chains) = routing::team_context(&app, &sid, generation, &args).await?;
-                            routing::auto_routes(&config, &langs, &chains, &args).await
-                        } else {
-                            routing::AutoRoutes::default()
-                        };
                         // A requested speed tier is checked against the live Codex catalog before any worker exists.
                         let speeds = match speed_context(&app, &sid, generation, &name, &args)? {
                             Some(cwd) => Some(read_speeds(&cwd).await),
                             None => None,
+                        };
+                        let routes = if name == "pandacode_dispatch_workers" && routing::has_auto(&args, crate::model_routing::enabled()) {
+                            let (config, langs, chains, tiers) = routing::team_context(&app, &sid, generation, &args).await?;
+                            routing::auto_routes(&config, &langs, &chains, &tiers, &speeds, &args).await
+                        } else {
+                            routing::AutoRoutes::default()
                         };
                         let caller = caller.as_ref().map(|(id, attempt)| (id.as_str(), *attempt));
                         dispatch(&app, &sid, generation, caller, &name, args, &stopped, &routes, &speeds)?
@@ -1378,16 +1388,18 @@ fn speed_context(app: &tauri::AppHandle, sid: &str, generation: u64, name: &str,
     if !active(&team.status) || team.generation != generation {
         return Err("Team is no longer active.".into());
     }
-    if !asks_speed(&team.config, args) {
+    if !asks_speed(&team, args) {
         return Ok(None);
     }
     let lead = store.session(sid)?;
     Ok(Some(store.workspace_root(&lead.project_id, Some(sid))?))
 }
-/// Whether any assignment may run at a speed tier (a superset: `dispatch_as` decides).
-fn asks_speed(config: &TeamConfig, args: &Value) -> bool {
-    let slug = args["assignments"].as_array().into_iter().flatten().any(|a| a["provider"] == "codex" && a["model"].as_str().is_some_and(|m| split_tier(m).1.is_some()));
-    slug || config.workers.iter().any(wants_speed)
+/// Whether any assignment may run at a speed tier: a Codex slug, a tiered team profile, or the
+/// replacement of a worker that ran at one (a superset: `dispatch_as` decides).
+fn asks_speed(team: &TeamSnapshot, args: &Value) -> bool {
+    let assignments = || args["assignments"].as_array().into_iter().flatten();
+    let slug = assignments().any(|a| a["provider"] == "codex" && a["model"].as_str().is_some_and(|m| split_tier(m).1.is_some()));
+    slug || team.config.workers.iter().any(wants_speed) || !routing::replaced_tiers(team, args).is_empty()
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1579,14 +1591,11 @@ fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &Assignment) 
     };
     crate::providers::validate_reasoning_effort(&provider, reasoning_effort.as_deref())?;
     // A roster entry keeps its display name and speed tier; anything else is named after its model.
-    let roster = config
-        .workers
-        .iter()
-        .find(|p| p.provider == provider && p.model == model);
+    let roster = routing::roster_entry(config, &provider, &model);
     Ok(WorkerProfile {
         id: "auto".into(),
         name: roster.map_or_else(|| model.clone(), |p| p.name.clone()),
-        service_tier: roster.and_then(|p| p.service_tier.clone()),
+        service_tier: roster.and_then(routing::profile_tier),
         provider,
         model,
         reasoning_effort,
@@ -1825,7 +1834,13 @@ fn dispatch_as(
                 } else {
                     staff(&team.config, &parent, &assignment)?
                 };
-                let profile = &resolve_speed(profile, speeds)?;
+                let profile = resolve_speed(profile, speeds)?;
+                // A replacement keeps the speed tier the replaced worker had, unless it names its own.
+                let inherited = assignment.replaces.as_ref().and_then(|id| team.workers.iter().find(|w| w.id == *id)).and_then(|old| old.service_tier.clone().map(|tier| (old.name.clone(), tier)));
+                let profile = &match inherited {
+                    Some((old, tier)) if profile.service_tier.is_none() => inherit_speed(profile, &old, &tier, speeds)?,
+                    _ => profile,
+                };
                 let session = store.create_session(
                     &parent.project_id,
                     &profile.provider,
@@ -2156,9 +2171,9 @@ async fn prepare_speed(app: &tauri::AppHandle, action: &Launch) -> std::result::
     let store = state.store.lock().map_err(|e| e.to_string())?;
     apply_speed(&store, &action.sid, &model, &tier, tiers)
 }
-/// The checkout, model and tier key of a launching Codex worker whose speed is not chosen yet.
-/// A session that already carries `serviceTier` keeps it, so follow-ups and resumes never look it
-/// up again.
+/// The checkout, model and tier key of a launching worker with a speed tier. Every admitted launch
+/// (the first, a resume, a follow-up, a re-dispatch) checks it again against the live catalog for
+/// the worker's current model, whatever the session saved before, even a null tier.
 fn speed_request(store: &Store, admission: &Admission, sid: &str) -> Result<Option<(std::path::PathBuf, String, String)>> {
     if sid == admission.parent {
         return Ok(None);
@@ -2169,15 +2184,28 @@ fn speed_request(store: &Store, admission: &Admission, sid: &str) -> Result<Opti
     let Some(worker) = team.workers.iter().find(|w| w.session_id == sid) else {
         return Ok(None);
     };
-    let Some(tier) = worker.service_tier.clone().filter(|_| worker.provider == "codex") else {
+    let Some(tier) = worker.service_tier.clone() else {
         return Ok(None);
     };
     let session = store.session(sid)?;
-    if session.provider != "codex" || session.codex_settings.as_ref().is_some_and(|s| s.get("serviceTier").is_some()) {
-        return Ok(None);
+    if worker.provider != "codex" || session.provider != "codex" {
+        return Err(format!("This worker must run at its {} speed tier, which only Codex runs.", codex_ops::tier_label(&tier)));
     }
     let cwd = store.workspace_root(&session.project_id, Some(sid))?;
     Ok(Some((cwd, session.model, tier)))
+}
+/// The speed tier key a team worker's session must run at (its worker record's), for the run's
+/// own check; None for every other task.
+pub(crate) fn required_tier(store: &Store, sid: &str) -> Result<Option<String>> {
+    let parent: Option<String> = store
+        .db
+        .query_row("SELECT parent_session_id FROM architect_workers WHERE session_id=?1", [sid], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some(parent) = parent else {
+        return Ok(None);
+    };
+    Ok(load(store, &parent)?.and_then(|team| team.workers.into_iter().find(|w| w.session_id == sid)).and_then(|w| w.service_tier))
 }
 /// Saves the catalog id of the worker's tier in its session, or says why it cannot run at it.
 fn apply_speed(

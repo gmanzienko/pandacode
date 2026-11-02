@@ -160,9 +160,13 @@ When a team turns on, every tier each installed Codex model's catalog lists
 a `<model>@<tier>` entry in the team catalog, after every model, so the
 1000-entry cap never drops a model for them. Routing never picks a variant on its
 own: `pool_from` folds each variant into its model, so `auto` staffs the plain
-model unless a roster entry carries a tier. `route_models` lists a model's
+model unless a roster entry carries a tier (also when routing is off and the worker
+falls back to the lead's model). One exception narrows the pool instead: an `auto`
+replacement of a worker that ran at a tier keeps that tier, so it routes only over
+Codex models whose live catalog lists it (`routing::pool_for`), and with none it is
+refused rather than staffed at the default speed. `route_models` lists a model's
 variants beside it in `speedVariants`, each at the plain model's cost estimate and
-marked "extra usage, unpriced", because the catalog gives no prices. The lead's
+marked "extra usage", because the catalog gives no prices. The lead's
 team rules name the usable variants in one sentence and say to use them only when
 speed matters or you ask for it.
 
