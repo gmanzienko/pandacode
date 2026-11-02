@@ -7,7 +7,7 @@ use super::{brief, channels, guard, owner_of, Bot};
 use crate::{message_queue, storage::Store, AppState, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tauri::{Emitter, Manager};
 
 /// A message for a bot from the desktop, the web UI or a chat channel.
@@ -35,6 +35,23 @@ type Pending = Mutex<HashMap<String, Vec<(String, String)>>>;
 fn pending() -> &'static Pending {
     static PENDING: std::sync::OnceLock<Pending> = std::sync::OnceLock::new();
     PENDING.get_or_init(Default::default)
+}
+
+async fn drain_guard(session_id: &str) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+    type Drains = Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>;
+    static DRAINS: OnceLock<Drains> = OnceLock::new();
+    let drain = {
+        let mut drains = DRAINS.get_or_init(Default::default).lock().map_err(|e| e.to_string())?;
+        drains.retain(|_, drain| drain.strong_count() > 0);
+        if let Some(drain) = drains.get(session_id).and_then(Weak::upgrade) {
+            drain
+        } else {
+            let drain = Arc::new(tokio::sync::Mutex::new(()));
+            drains.insert(session_id.to_owned(), Arc::downgrade(&drain));
+            drain
+        }
+    };
+    Ok(drain.lock_owned().await)
 }
 
 /// What an inbound text asks for, before it is treated as a message to the agent.
@@ -332,36 +349,48 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
     let _ = app.emit("bots-changed", ());
     // Send the next queued message natively, so bot threads keep moving without the window.
     // A failed run holds the queue until the next turn ends cleanly.
-    let next = if !successful { None } else { state.store.lock().ok().and_then(|store| message_queue::list(&store, Some(session_id)).ok()).and_then(|queue| queue.into_iter().next()) };
-    let taken = next.and_then(|entry| state.store.lock().ok().and_then(|store| {
-        let entry = message_queue::take(&store, &entry.id).ok()?;
-        let delivery = super::shared_channels::promote_taken(&store, session_id, &entry.text);
-        Some((entry, delivery))
-    }));
-    if let Some((entry, delivery)) = taken {
-        super::failover::before_turn(app, &bot, session_id);
-        let (context, image_ids) = queued_prompt(&entry.attachments);
-        super::failover::remember_images(session_id, &image_ids);
-        let launched = launch_turn(app, session_id, format!("{}{context}", entry.text), image_ids, bot.project_id.clone()).await;
-        // A channel Stop that landed between the take and the launch stops the turn it missed.
-        let stopped = launched.is_ok() && delivery.as_ref().is_some_and(|request| state.store.lock().is_ok_and(|store| super::shared_channels::delivery_stopped(&store, request)));
-        if stopped {
-            let _ = crate::stop_session(app.clone(), app.state::<AppState>(), session_id.to_owned()).await;
-        }
-        // A failed launch puts the entry back first; no run ends, so the queue holds until the next turn.
-        if let Err(error) = launched {
-            super::failover::clear_images(session_id);
-            if let Ok(store) = state.store.lock() {
-                if let Err(lost) = message_queue::restore(&store, &entry) {
-                    eprintln!("bot {}: queued message lost after failed launch: {lost}", bot.id);
+    if !successful { return settled; }
+    let Ok(_drain) = drain_guard(session_id).await else { return settled };
+    for attempt in 0..2 {
+        let next = state.store.lock().ok().and_then(|store| message_queue::list(&store, Some(session_id)).ok()).and_then(|queue| queue.into_iter().next());
+        let taken = next.and_then(|entry| state.store.lock().ok().and_then(|store| {
+            let entry = message_queue::take(&store, &entry.id).ok()?;
+            let delivery = super::shared_channels::promote_taken(&store, session_id, &entry.text);
+            Some((entry, delivery))
+        }));
+        if let Some((entry, delivery)) = taken {
+            super::failover::before_turn(app, &bot, session_id);
+            let (context, image_ids) = queued_prompt(&entry.attachments);
+            super::failover::remember_images(session_id, &image_ids);
+            let launched = launch_turn(app, session_id, format!("{}{context}", entry.text), image_ids, bot.project_id.clone()).await;
+            // A channel Stop that landed between the take and the launch stops the turn it missed.
+            let stopped = launched.is_ok() && delivery.as_ref().is_some_and(|request| state.store.lock().is_ok_and(|store| super::shared_channels::delivery_stopped(&store, request)));
+            if stopped {
+                let _ = crate::stop_session(app.clone(), app.state::<AppState>(), session_id.to_owned()).await;
+            }
+            // A failed launch puts the entry back before another completion can drain it.
+            if let Err(error) = launched {
+                super::failover::clear_images(session_id);
+                if let Ok(store) = state.store.lock() {
+                    if let Err(lost) = message_queue::restore(&store, &entry) {
+                        eprintln!("bot {}: queued message lost after failed launch: {lost}", bot.id);
+                    }
+                    if let Some(request) = &delivery { super::shared_channels::launch_failed(&store, session_id, request); }
+                    if error != crate::architect::ARCHITECT_BUSY {
+                        let _ = super::log(&store, &bot.id, "error", &format!("Couldn't send a queued message: {}", error.chars().take(160).collect::<String>()), json!({"sessionId": session_id}));
+                    }
                 }
-                if let Some(request) = &delivery { super::shared_channels::launch_failed(&store, session_id, request); }
-                if error != crate::architect::ARCHITECT_BUSY {
-                    let _ = super::log(&store, &bot.id, "error", &format!("Couldn't send a queued message: {}", error.chars().take(160).collect::<String>()), json!({"sessionId": session_id}));
+                let _ = app.emit("bots-changed", ());
+                // The busy turn may have ended before this drain acquired its lock.
+                if attempt == 0 && error == crate::architect::ARCHITECT_BUSY
+                    && state.agents.lock().is_ok_and(|agents| !agents.contains_key(session_id)
+                        && state.store.lock().is_ok_and(|store| crate::architect::load(&store, session_id).is_ok_and(|team| team.is_none_or(|team| team.pending_turn.is_none()))))
+                {
+                    continue;
                 }
             }
-            let _ = app.emit("bots-changed", ());
         }
+        break;
     }
     settled
 }
@@ -498,6 +527,44 @@ pub(crate) async fn stop_bot(app: &tauri::AppHandle, bot_id: &str) {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn drains_serialize_one_session_without_blocking_other_sessions() {
+        let session = crate::storage::id();
+        let events = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let first = tokio::spawn({
+            let session = session.clone();
+            let events = events.clone();
+            async move {
+                let _guard = drain_guard(&session).await.unwrap();
+                events.lock().unwrap().push("first entered");
+                entered.send(()).unwrap();
+                released.await.unwrap();
+                events.lock().unwrap().push("first exited");
+            }
+        });
+        waiting.await.unwrap();
+        let second = tokio::spawn({
+            let session = session.clone();
+            let events = events.clone();
+            async move {
+                let _guard = drain_guard(&session).await.unwrap();
+                events.lock().unwrap().push("second entered");
+            }
+        });
+        // Poll the same-session waiter while the first holder remains inside its drain.
+        tokio::task::yield_now().await;
+        let other = tokio::time::timeout(std::time::Duration::from_secs(1), drain_guard(&crate::storage::id())).await.unwrap().unwrap();
+        assert_eq!(*events.lock().unwrap(), ["first entered"]);
+        assert!(!second.is_finished());
+        drop(other);
+        release.send(()).unwrap();
+        first.await.unwrap();
+        second.await.unwrap();
+        assert_eq!(*events.lock().unwrap(), ["first entered", "first exited", "second entered"]);
+    }
+
     #[test]
     fn saved_team_selects_team_launch_and_plain_thread_does_not() {
         let store = Store::open(std::path::Path::new(":memory:")).unwrap();
@@ -516,6 +583,10 @@ mod tests {
     #[test]
     fn initial_queued_and_failover_turns_share_team_aware_launch() {
         let gateway = include_str!("gateway.rs").split("#[cfg(test)]").next().unwrap();
+        let launch = gateway.split("async fn launch_turn(").nth(1).unwrap().split("async fn start_or_queue(").next().unwrap();
+        for call in ["team_thread(", "architect_start_in_project(", "launch_task_in_project("] {
+            assert!(launch.contains(call), "launch_turn must call {call}");
+        }
         for (start, end) in [("async fn start_or_queue(", "fn unbrief("), ("pub(crate) async fn run_finished(", "pub(crate) fn queued_prompt(")] {
             let body = gateway.split(start).nth(1).unwrap().split(end).next().unwrap();
             assert!(body.contains("launch_turn("), "{start} must use team-aware dispatch");
