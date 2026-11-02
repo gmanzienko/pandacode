@@ -228,9 +228,21 @@ pub(super) async fn codex_jobs(
 #[serde(tag = "action", rename_all = "camelCase", deny_unknown_fields)]
 pub(super) enum TaskPreference {
     Plan { enabled: bool },
+    /// Older callers (phones, remote hosts): Fast on or off.
     Fast { enabled: bool },
     /// A speed tier from the model's catalog; None is the standard speed.
     Speed { tier: Option<String> },
+    /// A speed tier by catalog id or name (`fast`, `ultrafast`), any case; null is the model's default.
+    ServiceTier { tier: Option<String> },
+}
+/// The speed tiers the installed Codex catalog lists for this task's model.
+#[tauri::command]
+pub(super) async fn codex_service_tiers(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<command_operations::ServiceTier>> {
+    let (task, cwd) = context(&state, &session_id)?;
+    command_operations::service_tiers(&cwd, &task.model).await
 }
 #[tauri::command]
 pub(super) async fn set_task_preference(
@@ -290,6 +302,13 @@ pub(super) async fn set_task_preference(
             };
             json!({"serviceTier":tier})
         }
+        TaskPreference::ServiceTier { tier } => {
+            let tier = match tier.as_deref().map(str::trim) {
+                None | Some("" | "default") => Value::Null,
+                Some(wanted) => json!(command_operations::service_tier(&cwd, &task.model, wanted).await?),
+            };
+            json!({"serviceTier":tier})
+        }
     };
     if running {
         live_request(&state, &session_id, "thread/settings/update", delta.clone()).await?;
@@ -321,7 +340,7 @@ fn save_preference(store: &Store, sid: &str, delta: &Value) -> Result<Session> {
 fn claude_tier(request: TaskPreference) -> Result<Option<String>> {
     let tier = match request {
         TaskPreference::Fast { enabled } => enabled.then(|| "fast".to_string()),
-        TaskPreference::Speed { tier } => tier,
+        TaskPreference::Speed { tier } | TaskPreference::ServiceTier { tier } => tier,
         TaskPreference::Plan { .. } => return Err("Use the Codex harness for this command.".into()),
     };
     if tier.as_deref().is_some_and(|tier| tier != "fast") {
@@ -878,6 +897,31 @@ mod command_tests {
         assert_eq!(claude_tier(TaskPreference::Speed { tier: None }).unwrap(), None);
         assert!(claude_tier(TaskPreference::Speed { tier: Some("priority".into()) }).is_err());
         assert!(claude_tier(TaskPreference::Plan { enabled: true }).is_err());
+    }
+
+    #[test]
+    fn speed_tier_preferences_parse_and_replace_the_saved_tier() {
+        let parse = |value: Value| serde_json::from_value::<TaskPreference>(value);
+        assert!(matches!(
+            parse(json!({"action":"serviceTier","tier":"ultrafast"})).unwrap(),
+            TaskPreference::ServiceTier { tier: Some(t) } if t == "ultrafast"
+        ));
+        assert!(matches!(
+            parse(json!({"action":"serviceTier","tier":null})).unwrap(),
+            TaskPreference::ServiceTier { tier: None }
+        ));
+        // Phones and remote hosts still send Fast on/off.
+        assert!(matches!(
+            parse(json!({"action":"fast","enabled":true})).unwrap(),
+            TaskPreference::Fast { enabled: true }
+        ));
+        assert!(parse(json!({"action":"serviceTier","tier":"fast","enabled":true})).is_err());
+        let saved = json!({"serviceTier":"priority","collaborationMode":{"mode":"plan"}});
+        let updated = merge_preference(Some(saved), &json!({"serviceTier":"ultrafast"})).unwrap();
+        assert_eq!(updated["serviceTier"], "ultrafast");
+        assert_eq!(updated["collaborationMode"]["mode"], "plan");
+        let updated = merge_preference(Some(updated), &json!({"serviceTier":null})).unwrap();
+        assert!(updated["serviceTier"].is_null());
     }
     #[test]
     fn imported_task_lookup_includes_history_outside_the_sidebar_limit() {
