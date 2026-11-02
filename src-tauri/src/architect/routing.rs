@@ -314,6 +314,7 @@ fn unrouted(config: &TeamConfig, lead: &storage::Session) -> WorkerProfile {
         provider: lead.provider.clone(),
         model: lead.model.clone(),
         reasoning_effort: lead.reasoning_effort.clone(),
+        service_tier: None,
     };
     if config.auto && !config.roster_only {
         return own();
@@ -364,6 +365,8 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
                 provider: pick.provider,
                 model: pick.model,
                 reasoning_effort,
+                // Only a matched roster profile carries a speed tier.
+                service_tier: roster.and_then(|p| p.service_tier.clone()),
             };
             return Ok((profile, note, adjusted));
         }

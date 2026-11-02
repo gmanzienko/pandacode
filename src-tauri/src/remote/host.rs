@@ -4205,6 +4205,8 @@ mod tests {
             council: None,
             score_nudged: false,
             wrote_at: 0,
+            service_tier: None,
+            launch_note: None,
         }
     }
 

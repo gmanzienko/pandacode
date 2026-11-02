@@ -38,3 +38,4 @@ html[data-theme="dark"] .agent-team-lead:has(input:checked){color:var(--accent)}
 .agent-team-error{margin:0 var(--ds-row-pad-x) 10px;font-size:var(--ds-text-meta);color:var(--ds-danger)}
 .agent-guidance,.agent-team-editor input[type=text],.agent-team-filter{background:var(--ds-card-inset)}
 .agent-guidance:focus,.agent-team-editor input[type=text]:focus{box-shadow:0 0 0 2px var(--focus)}
+.agent-team-speed{max-width:30%}
