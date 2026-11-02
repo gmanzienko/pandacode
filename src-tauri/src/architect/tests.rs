@@ -3474,3 +3474,140 @@ fn failover_to_another_harness_drops_the_codex_speed_tier() {
     drop(store);
     crate::model_health::record_success("codex", model);
 }
+#[test]
+fn codex_speed_slugs_split_into_their_model_and_tier() {
+    use crate::panda_router::{base_model, speed_tier};
+    assert_eq!(split_tier("gpt-6.1-sol@ultrafast"), ("gpt-6.1-sol", Some("ultrafast")));
+    assert_eq!(split_tier("gpt-6.1-sol@fast"), ("gpt-6.1-sol", Some("fast")));
+    assert_eq!(split_tier("gpt-6.1-sol@Fast"), ("gpt-6.1-sol", Some("fast")));
+    assert_eq!(split_tier("org@team/m@fast"), ("org@team/m", Some("fast")));
+    // An unknown tier, or no model before it, is a plain model ID.
+    for plain in ["gpt-6.1-sol", "gpt-6.1-sol@turbo", "gpt-6.1-sol@priority", "@fast", "m@fast@x", ""] {
+        assert_eq!(split_tier(plain), (plain, None), "{plain}");
+    }
+    assert_eq!((base_model("codex", "m@fast"), speed_tier("codex", "m@fast")), ("m", Some("fast")));
+    assert_eq!((base_model("claude", "m@fast"), speed_tier("opencode", "m@fast")), ("m@fast", None));
+    // A slug runs its model at that tier, and wins over a profile's serviceTier.
+    let staffed = with_speed(profile("s", "codex", "gpt-6.1-sol@ultrafast", "Sol")).unwrap();
+    assert_eq!((staffed.model.as_str(), staffed.service_tier.as_deref()), ("gpt-6.1-sol", Some("ultrafast")));
+    let mut both = profile("s", "codex", "gpt-6.1-sol@fast", "Sol");
+    both.service_tier = Some("ultrafast".into());
+    assert_eq!(with_speed(both).unwrap().service_tier.as_deref(), Some("fast"));
+    let plain = profile("s", "codex", "gpt-6.1-sol", "Sol");
+    assert_eq!(with_speed(plain.clone()).unwrap(), plain);
+    // Other harnesses refuse the tier names, in dispatch and in saved profiles.
+    assert!(with_speed(profile("o", "claude", "opus@fast", "Opus")).unwrap_err().contains("only Codex models take a speed tier"));
+    let mut c = config();
+    c.workers[0].model = "gpt-6.1-sol@ultrafast".into();
+    assert!(c.validate().is_ok());
+    c.workers[0].provider = "claude".into();
+    assert!(c.validate().unwrap_err().contains("only Codex models"));
+}
+#[test]
+fn a_direct_codex_slug_dispatches_its_model_at_that_speed() {
+    let (state, sid) = auto_state();
+    call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[auto_assignment("uf", json!({"provider":"codex","model":"gpt-6.1-sol@ultrafast"}))]})).unwrap();
+    {
+        let store = state.store.lock().unwrap();
+        let team = load(&store, &sid).unwrap().unwrap();
+        let worker = &team.workers[0];
+        assert_eq!((worker.provider.as_str(), worker.model.as_str(), worker.service_tier.as_deref()), ("codex", "gpt-6.1-sol", Some("ultrafast")));
+        // Codex is never handed the slug as a model ID.
+        let session = store.session(&worker.session_id).unwrap();
+        assert_eq!((session.provider.as_str(), session.model.as_str()), ("codex", "gpt-6.1-sol"));
+        let admission = Admission { parent: sid.clone(), generation: team.generation };
+        let (_, model, tier) = speed_request(&store, &admission, &worker.session_id).unwrap().unwrap();
+        assert_eq!((model.as_str(), tier.as_str()), ("gpt-6.1-sol", "ultrafast"));
+        apply_speed(&store, &admission, &worker.session_id, &model, &tier, Ok("ultrafast".into())).unwrap();
+        assert_eq!(store.session(&worker.session_id).unwrap().codex_settings, Some(json!({"serviceTier":"ultrafast"})));
+    }
+    let error = call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[auto_assignment("cl", json!({"provider":"claude","model":"opus@fast"}))]})).unwrap_err();
+    assert!(error.contains("only Codex models take a speed tier"), "{error}");
+}
+fn luna_variants() -> Vec<WorkerProfile> {
+    vec![profile("codex-luna-fast", "codex", "gpt-6-luna@fast", "GPT-6 Luna Fast · Codex"), profile("codex-luna-ultrafast", "codex", "gpt-6-luna@ultrafast", "GPT-6 Luna Ultrafast · Codex")]
+}
+#[test]
+fn routing_never_picks_a_speed_variant_but_route_models_and_the_lead_see_them() {
+    let (state, sid) = auto_state();
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.config.catalog = [routing_catalog(), luna_variants()].concat();
+        save(&store, &mut team).unwrap();
+    }
+    let config = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap().config;
+    let pool = routing::pool(&config);
+    assert!(pool.iter().all(|m| !m.model.contains('@')), "{pool:?}");
+    assert_eq!(pool.iter().filter(|m| m.model == "gpt-6-luna").count(), 1);
+    let prompts = ["Fix a typo in the README heading.", "Prove the scheduler never starves a queued worker and refactor the dispatcher across modules.", "Write unit tests for the date parser."];
+    for (n, mode) in [Mode::Cheapest, Mode::Balanced, Mode::Quality].into_iter().enumerate() {
+        let assignments: Vec<Value> = prompts.iter().enumerate().map(|(i, p)| auto_assignment(&format!("m{n}p{i}"), json!({"profileId":"auto","prompt":p}))).collect();
+        routed_call_in(&state, &sid, json!({"assignments":assignments}), true, mode).unwrap();
+    }
+    let team = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    assert_eq!(team.workers.len(), 9);
+    assert!(team.workers.iter().all(|w| w.service_tier.is_none() && !w.model.contains('@')), "{:?}", team.workers.iter().map(|w| (&w.model, &w.service_tier)).collect::<Vec<_>>());
+    // route_models lists them beside their model with scaled usage; the lead's rules name them.
+    let (pool, jobs, _) = routing::route_request(&config, &[], json!({"tasks":[{"text":"Write unit tests for the date parser."}],"mode":"quality"})).unwrap();
+    let solo: Vec<_> = pool.into_iter().filter(|m| m.provider == "codex").collect();
+    let routes = crate::model_routing::route_with(&crate::panda_router::Router::heuristic(), &Default::default(), &solo, jobs).unwrap();
+    let out = routing::route_summary(&config, &routes);
+    let luna = &out["tasks"][0]["pick"];
+    assert_eq!(luna["model"], "gpt-6-luna", "{out}");
+    let cost = luna["estCostUsd"].as_f64().unwrap();
+    let speeds = luna["speedEstCostUsd"].as_object().unwrap();
+    assert_eq!(speeds.keys().collect::<Vec<_>>(), ["gpt-6-luna@fast", "gpt-6-luna@ultrafast"]);
+    assert!((speeds["gpt-6-luna@fast"].as_f64().unwrap() - 2.0 * cost).abs() < 1e-3 && (speeds["gpt-6-luna@ultrafast"].as_f64().unwrap() - 3.0 * cost).abs() < 1e-3, "{speeds:?}");
+    let note = routing::speed_note(&config);
+    assert!(note.contains("gpt-6-luna@fast, gpt-6-luna@ultrafast") && note.contains("routing never picks them"), "{note}");
+    assert!(routing::speed_note(&super::tests::config()).is_empty());
+    // A switched-off variant is not offered.
+    let off = crate::model_routing::Exclusions { providers: vec![], models: vec![crate::model_routing::ExcludedModel { provider: "codex".into(), model: "gpt-6-luna@ultrafast".into() }] };
+    crate::model_routing::with_exclusions(off, || {
+        assert_eq!(routing::speed_variants(&config, "codex", "gpt-6-luna"), vec![("gpt-6-luna@fast".to_string(), "fast")]);
+        assert!(!routing::speed_note(&config).contains("gpt-6-luna@ultrafast"));
+    });
+}
+#[test]
+fn a_named_teams_speed_variant_carries_its_tier_when_routed() {
+    let (state, sid) = roster_only_state(false);
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.config.workers = vec![profile("luna-fast", "codex", "gpt-6-luna@fast", "Luna Fast")];
+        save(&store, &mut team).unwrap();
+    }
+    let result = routed_call(&state, &sid, json!({"assignments":[auto_assignment("r", json!({"profileId":"auto"}))]}), true).unwrap();
+    assert!(result["routing"][0].as_str().unwrap().contains("routed: "), "{result}");
+    // By profile ID too.
+    routed_call(&state, &sid, json!({"assignments":[auto_assignment("p", json!({"profileId":"luna-fast"}))]}), true).unwrap();
+    let store = state.store.lock().unwrap();
+    let team = load(&store, &sid).unwrap().unwrap();
+    for worker in &team.workers {
+        assert_eq!((worker.profile_id.as_str(), worker.model.as_str(), worker.service_tier.as_deref()), ("luna-fast", "gpt-6-luna", Some("fast")));
+        assert_eq!(store.session(&worker.session_id).unwrap().model, "gpt-6-luna");
+    }
+}
+#[test]
+fn a_failed_speed_variant_counts_as_its_model_when_escalating() {
+    let (state, sid) = auto_state();
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.config.catalog = [routing_catalog(), luna_variants()].concat();
+        save(&store, &mut team).unwrap();
+    }
+    let first = call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[auto_assignment("v1", json!({"provider":"codex","model":"gpt-6-luna@fast"}))]})).unwrap();
+    let id = first["workerIds"][0].as_str().unwrap().to_string();
+    let store = state.store.lock().unwrap();
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    team.workers[0].status = "completed".into();
+    save(&store, &mut team).unwrap();
+    let chain = routing::failed_chain(&store, &team, &id).unwrap().unwrap();
+    assert_eq!(chain.failed.iter().map(|m| (m.provider.as_str(), m.model.as_str())).collect::<Vec<_>>(), [("codex", "gpt-6-luna")]);
+    assert_eq!(chain.failed[0].name, "GPT-6 Luna · Codex");
+    // route_models' failed list takes a slug the same way.
+    let (_, jobs, _) = routing::route_request(&team.config, &[], json!({"tasks":[{"text":"x","failed":[{"provider":"codex","model":"gpt-6-luna@ultrafast"}]}]})).unwrap();
+    assert_eq!((jobs[0].failed[0].model.as_str(), jobs[0].failed[0].name.as_str()), ("gpt-6-luna", "GPT-6 Luna · Codex"));
+}

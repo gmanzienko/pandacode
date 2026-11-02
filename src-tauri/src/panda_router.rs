@@ -140,11 +140,41 @@ pub struct Router {
     onnx: Option<OnnxProfiler>,
 }
 
+/// Codex speed tiers a model slug may name: `<model>@fast`, `<model>@ultrafast`.
+pub const SPEED_TIERS: [&str; 2] = ["fast", "ultrafast"];
+
+/// Splits a `<model>@<tier>` slug into its model and speed tier (any case, returned lowercase).
+/// Anything else, including an unknown tier or an empty model, is a plain model id.
+pub fn split_tier(model: &str) -> (&str, Option<&'static str>) {
+    if let Some((base, suffix)) = model.rsplit_once('@') {
+        if let Some(tier) = SPEED_TIERS.iter().find(|t| t.eq_ignore_ascii_case(suffix)) {
+            if !base.is_empty() {
+                return (base, Some(tier));
+            }
+        }
+    }
+    (model, None)
+}
+
+/// The model a speed variant runs: Codex slugs drop their tier; any other model is itself.
+pub fn base_model<'a>(provider: &str, model: &'a str) -> &'a str {
+    match split_tier(model) {
+        (base, Some(_)) if provider == "codex" => base,
+        _ => model,
+    }
+}
+
+/// The speed tier of a Codex variant slug.
+pub fn speed_tier(provider: &str, model: &str) -> Option<&'static str> {
+    split_tier(model).1.filter(|_| provider == "codex")
+}
+
 /// Maps a PandaCode model to a card id: the harness table, then upstream alias matching, then (for
-/// `default`) the display name. Ambiguous or unknown -> None.
+/// `default`) the display name. Ambiguous or unknown -> None. A Codex speed variant shares its
+/// model's card.
 pub fn resolve_card(provider: &str, model: &str, name: &str) -> Option<&'static str> {
     let catalog = cards::catalog().ok()?;
-    catalog.resolve(provider, model, name).map(|i| catalog.cards[i].id.as_str())
+    catalog.resolve(provider, base_model(provider, model), name).map(|i| catalog.cards[i].id.as_str())
 }
 
 /// A model's tier-list key: its card id when rated (the same model on several harnesses shares it),

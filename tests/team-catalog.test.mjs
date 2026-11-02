@@ -32,3 +32,21 @@ test('an unlimited catalog (OpenCode with a saved selection) passes through', ()
   assert.equal(result.limited, false);
   assert.equal(result.models.length, 301);
 });
+
+test('Codex models whose catalog lists speed tiers get @fast / @ultrafast variants after every model', async () => {
+  const { buildTeamCatalog, CATALOG_MAX } = await import('../src/team-catalog.ts');
+  const { catalog, roster } = buildTeamCatalog([
+    { id: 'codex', name: 'Codex', models: [{ id: 'default', name: 'Default', speedTiers: ['fast'] }, { id: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', speedTiers: ['fast', 'ultrafast'] }, { id: 'gpt-6-luna', name: 'GPT-6 Luna', speedTiers: ['fast', 'turbo'] }, { id: 'plain', name: 'Plain' }] },
+    { id: 'claude', name: 'Claude Code', models: [{ id: 'opus', name: 'Opus', speedTiers: ['fast'] }] },
+  ]);
+  assert.deepEqual(catalog.map(p => p.model), ['default', 'opus', 'gpt-6.1-sol', 'gpt-6-luna', 'plain', 'gpt-6.1-sol@fast', 'gpt-6.1-sol@ultrafast', 'gpt-6-luna@fast']);
+  const ultrafast = catalog.find(p => p.model === 'gpt-6.1-sol@ultrafast');
+  assert.deepEqual({ ...ultrafast }, { id: 'codex-gpt-6-1-sol-ultrafast', name: 'GPT-6.1 Sol Ultrafast · Codex', provider: 'codex', model: 'gpt-6.1-sol@ultrafast', reasoningEffort: null });
+  assert.equal(new Set(catalog.map(p => p.id)).size, catalog.length);
+  assert.ok(roster.every(p => !p.model.includes('@')), 'the roster lists models, not variants');
+  // A full catalog has no room left: variants never displace a model.
+  const many = Array.from({ length: CATALOG_MAX }, (_, i) => ({ id: `m${i}`, name: `M${i}`, speedTiers: ['fast'] }));
+  const full = buildTeamCatalog([{ id: 'codex', name: 'Codex', models: many }]).catalog;
+  assert.equal(full.length, CATALOG_MAX);
+  assert.ok(full.every(p => !p.model.includes('@')));
+});
