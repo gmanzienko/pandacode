@@ -391,7 +391,7 @@ fn unrouted(config: &TeamConfig, lead: &storage::Session) -> WorkerProfile {
 /// in Cheap or Balanced mode opens on the ladder's first (cheapest safe) rung and escalates from there;
 /// Best mode and escalations take the policy's pick.
 /// Returns the profile, the routing note, and how the effort was fitted to the model.
-pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &Assignment, routes: &AutoRoutes) -> Result<(WorkerProfile, String, Option<String>)> {
+pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &Assignment, routes: &AutoRoutes) -> Result<(WorkerProfile, super::TierOrigin, String, Option<String>)> {
     if assignment.provider.is_some() || assignment.model.is_some() {
         return Err("Use either profileId or provider and model, not both.".into());
     }
@@ -431,7 +431,7 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
                 // Only a matched roster profile carries a speed tier: routing never picks one itself.
                 service_tier: roster.and_then(profile_tier),
             };
-            return Ok((profile, note, adjusted));
+            return Ok((profile, super::TierOrigin::Implicit, note, adjusted));
         }
         Ok(_) => "no rated model fits",
         Err(reason) => reason,
@@ -439,7 +439,7 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
     let profile = unrouted(config, lead);
     let (reasoning_effort, adjusted) = model_efforts::apply(&profile.provider, &profile.model, wanted, profile.reasoning_effort.as_ref());
     let note = format!("not routed ({reason}), using {} · {}", profile.name, profile.provider);
-    Ok((WorkerProfile { reasoning_effort, ..profile }, note, adjusted))
+    Ok((WorkerProfile { reasoning_effort, ..profile }, super::TierOrigin::Implicit, note, adjusted))
 }
 
 #[derive(Deserialize)]

@@ -195,6 +195,10 @@ fn inherit_speed(mut profile: WorkerProfile, old: &str, tier: &str, speeds: &Spe
     if profile.provider != "codex" {
         return Err(format!("{old} ran at the {label} speed tier, so its replacement must too, and only Codex runs it; {} via {} cannot. Name a Codex model whose catalog lists {label}.", profile.model, profile.provider));
     }
+    // An implicitly matched roster slug must not override the inherited tier during resolution.
+    if !speeds.as_ref().and_then(|s| s.as_ref().ok()).is_some_and(|c| c.contains_key(&profile.model)) {
+        profile.model = split_tier(&profile.model).0.to_string();
+    }
     profile.service_tier = Some(tier.to_string());
     resolve_speed(profile, speeds).map_err(|e| format!("{old} ran at the {label} speed tier, so its replacement must too: {e}"))
 }
@@ -1899,6 +1903,7 @@ fn summaries(team: &TeamSnapshot, offset: usize, owner: Option<&str>) -> Value {
     let next = offset + workers.len();
     json!({"status":team.status,"round":team.round,"nextOffset":if next<visible{Some(next)}else{None},"workers":workers})
 }
+enum TierOrigin { Explicit, Implicit }
 /// Every worker session's permission mode, whatever the lead's: workers never wait on
 /// approvals. readOnly is advisory (the worker's rules and scheduling: read-only work may
 /// overlap writers), not enforced at runtime, so a readOnly worker can still write.
@@ -1907,7 +1912,7 @@ pub(crate) const WORKER_PERMISSION_MODE: &str = "full";
 /// teams may name a roster profile, a provider and model chosen by the lead (or asked
 /// for in the user's prompt), or nothing, which reuses the lead's own selection.
 /// `reasoningEffort` overrides the chosen default; the note says when it was adjusted.
-fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &Assignment) -> Result<(WorkerProfile, Option<String>)> {
+fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &Assignment) -> Result<(WorkerProfile, TierOrigin, Option<String>)> {
     let wanted = assignment.reasoning_effort.as_ref();
     if let Some(id) = &assignment.profile_id {
         if assignment.provider.is_some() || assignment.model.is_some() {
@@ -1917,13 +1922,16 @@ fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &Assignment) 
         if !routing::usable(profile) {
             return Err(format!("{} is switched off or paused. Use profileId \"auto\" or omit it.", profile.name));
         }
-        return Ok(with_effort(profile.clone(), wanted));
+        let origin = if routing::profile_tier(profile).is_some() { TierOrigin::Explicit } else { TierOrigin::Implicit };
+        let (profile, note) = with_effort(profile.clone(), wanted);
+        return Ok((profile, origin, note));
     }
     if !config.auto {
         return Err("Choose a worker profile with profileId.".into());
     }
+    let origin = if assignment.model.as_deref().is_some_and(|m| crate::panda_router::speed_tier(assignment.provider.as_deref().unwrap_or_default(), m).is_some()) { TierOrigin::Explicit } else { TierOrigin::Implicit };
     if config.roster_only {
-        return staff_from_roster(config, lead, assignment);
+        return staff_from_roster(config, lead, assignment).map(|(profile, note)| (profile, origin, note));
     }
     let (provider, model) = match (&assignment.provider, &assignment.model) {
         (Some(provider), Some(model)) => (provider.clone(), model.clone()),
@@ -1944,9 +1952,11 @@ fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &Assignment) 
         // The lead chose this provider, so a level it lacks is the lead's mistake to fix.
         model_efforts::explicit(&profile.provider, &profile.model, wanted)?;
         // Without the lead's level, the model's own default (not the lead's).
-        return Ok(with_effort(WorkerProfile { reasoning_effort: None, ..profile }, wanted));
+        let (profile, note) = with_effort(WorkerProfile { reasoning_effort: None, ..profile }, wanted);
+        return Ok((profile, origin, note));
     }
-    Ok(with_effort(profile, wanted))
+    let (profile, note) = with_effort(profile, wanted);
+    Ok((profile, origin, note))
 }
 /// Applies a requested effort over a profile's default, both fitted to its model.
 fn with_effort(profile: WorkerProfile, wanted: Option<&String>) -> (WorkerProfile, Option<String>) {
@@ -2187,27 +2197,25 @@ fn dispatch_as(
                     routed.push(format!("{shown}: {error} Ignored."));
                 }
                 let unchosen = assignment.profile_id.is_none() && assignment.provider.is_none() && assignment.model.is_none();
-                let profile = if assignment.profile_id.as_deref() == Some(routing::AUTO) || (unchosen && routes.contains_key(&assignment.key)) {
-                    let (profile, note, adjusted) = routing::staff(&team.config, &parent, &assignment, routes)?;
+                let (profile, tier_origin, effort_note) = if assignment.profile_id.as_deref() == Some(routing::AUTO) || (unchosen && routes.contains_key(&assignment.key)) {
+                    let (profile, origin, note, adjusted) = routing::staff(&team.config, &parent, &assignment, routes)?;
                     routed.push(match &adjusted {
                         Some(adjusted) => format!("{shown}: {note}; {adjusted}"),
                         None => format!("{shown}: {note}"),
                     });
-                    (profile, adjusted)
+                    (profile, origin, adjusted)
                 } else {
-                    let (profile, adjusted) = staff(&team.config, &parent, &assignment)?;
+                    let (profile, origin, adjusted) = staff(&team.config, &parent, &assignment)?;
                     if let Some(adjusted) = &adjusted {
                         routed.push(format!("{shown}: {adjusted}"));
                     }
-                    (profile, adjusted)
+                    (profile, origin, adjusted)
                 };
-                let (profile, effort_note) = profile;
-                let profile = resolve_speed(profile, speeds)?;
                 // A replacement keeps the speed tier the replaced worker had, unless it names its own.
                 let inherited = assignment.replaces.as_ref().and_then(|id| team.workers.iter().find(|w| w.id == *id)).and_then(|old| old.service_tier.clone().map(|tier| (old.name.clone(), tier)));
                 let profile = &match inherited {
-                    Some((old, tier)) if profile.service_tier.is_none() => inherit_speed(profile, &old, &tier, speeds)?,
-                    _ => profile,
+                    Some((old, tier)) if !matches!(tier_origin, TierOrigin::Explicit) => inherit_speed(profile, &old, &tier, speeds)?,
+                    _ => resolve_speed(profile, speeds)?,
                 };
                 let session = store.create_session(
                     &parent.project_id,
