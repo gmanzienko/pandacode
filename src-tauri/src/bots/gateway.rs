@@ -383,8 +383,8 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
                 let _ = app.emit("bots-changed", ());
                 // The busy turn may have ended before this drain acquired its lock.
                 if attempt == 0 && error == crate::architect::ARCHITECT_BUSY
-                    && state.agents.lock().is_ok_and(|agents| !agents.contains_key(session_id)
-                        && state.store.lock().is_ok_and(|store| crate::architect::load(&store, session_id).is_ok_and(|team| team.is_none_or(|team| team.pending_turn.is_none()))))
+                    && state.agents.lock().is_ok_and(|agents| !agents.contains_key(session_id))
+                    && state.store.lock().is_ok_and(|store| crate::architect::load(&store, session_id).is_ok_and(|team| team.is_none_or(|team| team.pending_turn.is_none())))
                 {
                     continue;
                 }
