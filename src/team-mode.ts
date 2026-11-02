@@ -25,21 +25,21 @@ export function modelSpeedTiers(providers: readonly { id: ProviderId; models: re
 }
 const attr = (text: string) => text.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 /** A Speed select's `<option>`s: Default, then exactly the tiers the model's catalog lists, named and
- * described as the catalog does. Empty when it lists none (no Speed control). A saved tier the list
- * lacks stays as an option marked as such until the model's catalog has loaded and the user decides. */
+ * described as the catalog does; never a tier the catalog lacks. Empty when it lists none, which hides
+ * the Speed control. A current tier the list lacks selects nothing but Default. */
 export function speedOptions(tiers: readonly SpeedTier[], current?: string | null): string {
-  if (!tiers.length && !current) return '';
-  const unknown = current && !tiers.some(tier => tier.key === current) ? [{ key: current, name: `${current} (not in the catalog)`, description: '' }] : [];
-  return [{ key: '', name: 'Default', description: "The model's standard speed" }, ...tiers, ...unknown]
-    .map(tier => `<option value="${attr(tier.key)}" title="${attr(tier.description)}" ${(current ?? '') === tier.key ? 'selected' : ''}>${attr(tier.name)}</option>`).join('');
+  if (!tiers.length) return '';
+  const chosen = tiers.some(tier => tier.key === current) ? current : '';
+  return [{ key: '', name: 'Default', description: "The model's standard speed" }, ...tiers]
+    .map(tier => `<option value="${attr(tier.key)}" title="${attr(tier.description)}" ${chosen === tier.key ? 'selected' : ''}>${attr(tier.name)}</option>`).join('');
 }
-/** After a model change: the saved tier if the new model's catalog lists it, else none and a one-line
- * note naming the dropped tier (as the previous catalog named it). */
+/** Against a model's (loaded) catalog: the saved tier if the catalog lists it, else none and a one-line
+ * note naming the stale tier (as an earlier catalog named it, else its key). */
 export function keepSpeed(saved: string | null | undefined, tiers: readonly SpeedTier[], model: string, previous: readonly SpeedTier[] = []): { tier: string | null; note: string } {
   if (!saved) return { tier: null, note: '' };
   if (tiers.some(tier => tier.key === saved)) return { tier: saved, note: '' };
-  const name = previous.find(tier => tier.key === saved)?.name ?? saved;
-  return { tier: null, note: `${name} is not in ${model || 'this model'}'s catalog, so speed is Default.` };
+  const name = previous.find(tier => tier.key === saved)?.name ?? `${saved.charAt(0).toUpperCase()}${saved.slice(1)}`;
+  return { tier: null, note: `${name} is not available for ${model || 'this model'}; this worker will use the default speed only if you save it that way.` };
 }
 export const modelKey = (model: Pick<TeamModel, 'provider' | 'model'>): string => `${model.provider}:${model.model}`;
 

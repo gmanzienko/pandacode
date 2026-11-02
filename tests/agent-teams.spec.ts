@@ -425,7 +425,7 @@ test('Codex workers choose only speed tiers their model\'s catalog lists, in age
   await workerSpeed.selectOption('fast');
   await pick('deepseek', 'deepseek-v4-pro');
   await expect(workerSpeed).toBeHidden();
-  await expect(note).toHaveText("Fast is not in deepseek-v4-pro's catalog, so speed is Default.");
+  await expect(note).toHaveText('Fast is not available for deepseek-v4-pro; this worker will use the default speed only if you save it that way.');
   await pick('codex', 'gpt-6-astra');
   await expect(workerSpeed).toHaveValue('');
   await workerSpeed.selectOption('ultrafast');
@@ -433,7 +433,7 @@ test('Codex workers choose only speed tiers their model\'s catalog lists, in age
   await pick('codex', 'gpt-6-luna');
   expect(await workerSpeed.locator('option').allTextContents()).toEqual(['Default', 'Fast']);
   await expect(workerSpeed).toHaveValue('');
-  await expect(note).toHaveText("Ultrafast is not in gpt-6-luna's catalog, so speed is Default.");
+  await expect(note).toHaveText('Ultrafast is not available for gpt-6-luna; this worker will use the default speed only if you save it that way.');
   await pick('codex', 'gpt-5.6-sol');
   await expect(workerSpeed).toBeHidden();
   await pick('codex', 'gpt-6-astra');
