@@ -842,7 +842,10 @@ mod tests {
     fn temp_base(label: &str) -> PathBuf {
         let base = std::env::temp_dir().join(format!("pandacode-start-{label}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&base).unwrap();
-        base.canonicalize().unwrap()
+        let base = base.canonicalize().unwrap();
+        #[cfg(windows)]
+        let base = dunce::simplified(&base).to_path_buf();
+        base
     }
 
     #[test]
@@ -962,7 +965,8 @@ mod tests {
         assert_eq!(git(&clone, &["rev-parse", "origin/main"], GIT).unwrap(), before, "no fetch");
         pick_branch(&clone, None, true).unwrap();
         assert_ne!(git(&clone, &["rev-parse", "origin/main"], GIT).unwrap(), before, "fetch sees the new commit");
-        let made = worktree_while_restoring(&clone, "feature").unwrap();
+        let root = std::fs::canonicalize(&clone).unwrap();
+        let made = worktree_while_restoring(&root, "feature").unwrap();
         assert_eq!(std::fs::read_to_string(clone.join("a.txt")).unwrap(), "a");
         assert_eq!(std::fs::read_to_string(made.path.join("a.txt")).unwrap(), "a");
         assert!(made.branch.starts_with("pandacode/"));
@@ -972,7 +976,7 @@ mod tests {
         checkout(&clone, "main").unwrap();
         checkout(&clone, "feature").unwrap();
         assert_eq!(git(&clone, &["branch", "--show-current"], GIT).unwrap(), "feature");
-        discard(&clone, &made);
+        discard(&root, &made);
         assert!(!made.path.exists());
         let _ = std::fs::remove_dir_all(&base);
     }

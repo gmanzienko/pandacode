@@ -139,14 +139,19 @@ test('Rank models: a paused model has no chip until it is allowed again', async 
   await install(page);
   await openTeams(page);
   await expect(chip(page, 'Claude Sonnet 5.5')).toBeVisible();
-  await expect(group(page).locator('.tier-chip').filter({ hasText: 'GPT-6 Luna' })).toHaveCount(0);
+  // Codex and Command Code share the merged row, so the chip survives the pause; the paused harness must drop off it.
+  // The label comes from whichever harness is first, so target the chip by its key and the logo by its provider.
+  const luna = group(page).locator('.tier-chip[data-key="gpt-6-luna"]');
+  await expect(luna.locator('[data-provider="commandcode"]')).toHaveCount(0);
   const pools = await calls(page, 'model_routing_tier_models');
   expect(pools).toHaveLength(1);
   // Native drops `default` entries that resolve to no card, so only the paused model is left out here.
   expect(pools[0].args.pool.some((m: any) => m.provider === 'commandcode' && m.model === 'gpt-6-luna')).toBe(false);
   await page.evaluate(() => { (window as any).__tiersResult = {}; });
   await settings(page).getByRole('button', { name: /^Allow (GPT-6 Luna|gpt-6-luna) · Command Code now$/ }).click();
-  await expect(chip(page, 'GPT-6 Luna')).toBeVisible();
+  await expect(luna.locator('[data-provider="commandcode"]')).toHaveCount(1);
+  // The reload after Allow re-includes the Command Code variant in the pool the UI sends to native.
+  await expect.poll(async () => (await calls(page, 'model_routing_tier_models')).at(-1)?.args.pool).toContainEqual({ provider: 'commandcode', model: 'gpt-6-luna', name: expect.any(String) });
 });
 
 test('Rank models: focus follows the chip after Move to and lands on a chip after Reset', async ({ page }) => {
