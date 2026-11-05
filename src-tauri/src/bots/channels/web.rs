@@ -111,6 +111,8 @@ fn history(app: &tauri::AppHandle, channel: &Channel) -> Value {
             Some(rows.flatten().map(|(role, content, at)| json!({"role": role, "text": if role == "user" { visible(&content) } else { content }, "at": at})).collect())
         })
         .unwrap_or_default();
+    // Never hold the store while taking the agents lock: elsewhere they are taken agents first.
+    drop(store);
     let busy = session.as_deref().is_some_and(|session| state.agents.lock().map(|agents| agents.contains_key(session)).unwrap_or(false));
     json!({
         "bot": bot.map(|bot| json!({"name": bot.name, "role": bot.role, "avatar": bot.avatar, "paused": bot.paused})),

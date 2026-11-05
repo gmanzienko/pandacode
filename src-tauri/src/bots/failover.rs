@@ -287,7 +287,7 @@ async fn switch(app: &tauri::AppHandle, bot: &Bot, session: &str, turn: &FailedT
         failover.switched(session, from, to, cause);
     }
     let _ = app.emit("sessions-changed", ());
-    let result = crate::launch_task_in_project(app.clone(), app.state::<AppState>(), session.to_owned(), Some(turn.text.clone()), Some(turn.image_ids.clone()), Some(bot.project_id.clone())).await;
+    let result = super::gateway::launch_turn(app, session, turn.text.clone(), turn.image_ids.clone(), bot.project_id.clone()).await;
     if let Err(error) = result {
         let state = app.state::<AppState>();
         if let Ok(store) = state.store.lock() {

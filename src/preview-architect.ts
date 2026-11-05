@@ -5,6 +5,7 @@ import { workerQueueReason } from './worker-scheduling.ts';
 interface PreviewHost {
   parent(id: unknown): Session;
   assertIdle(parent: Session): void;
+  architectLive(parentId: string): boolean;
   append(parentId: string, role: string, content: string): Message;
   finishTiming(parentId: string): void;
   finishChanges(user: Message): void;
@@ -14,7 +15,7 @@ interface PreviewHost {
   agent(event: AgentEvent): void;
 }
 interface WorkerRun { worker: TeamWorker; output: string; cursor: number; timer?: number; messages: Message[] }
-interface TeamRun { snapshot: TeamSnapshot; runs: WorkerRun[]; batchStart: number; reviewTimer?: number; messages?: TeamMessage[] }
+interface TeamRun { snapshot: TeamSnapshot; runs: WorkerRun[]; batchStart: number; reviewTimer?: number; turnTimer?: number; messages?: TeamMessage[] }
 
 const storageKey = 'pandacode.preview.architect-configs';
 const libraryKey = 'pandacode.preview.architect-library';
@@ -61,7 +62,16 @@ export function createPreviewArchitect(host: PreviewHost) {
       const models = host.models(profile.provider);
       const model = profile.model ? models.find(model => model.id === profile.model) : models[0];
       if (profile.reasoningEffort != null && (typeof profile.reasoningEffort !== 'string' || profile.reasoningEffort.length > 32 || model && !model.reasoningEfforts?.some(effort => effort.id === profile.reasoningEffort))) throw new Error('This worker model does not support that reasoning effort.');
-      return { id: profile.id, name: profile.name.trim(), provider: profile.provider, model: profile.model, reasoningEffort: profile.reasoningEffort ?? null };
+      // Like the native check: Codex workers only, and only a tier the model's catalog lists (a slug's or serviceTier).
+      if (profile.serviceTier != null && profile.provider !== 'codex') throw new Error(`${profile.name.trim()}: only Codex workers take a speed tier.`);
+      const at = profile.provider === 'codex' ? profile.model.lastIndexOf('@') : -1;
+      const wanted = at > 0 ? profile.model.slice(at + 1) : profile.serviceTier;
+      if (wanted) {
+        const base = at > 0 ? profile.model.slice(0, at) : profile.model;
+        const tiers = (base ? models.find(entry => entry.id === base) : models[0])?.speedTiers ?? [];
+        if (!tiers.some(tier => tier.key === wanted)) throw new Error(`${profile.name.trim()}: ${wanted[0].toUpperCase()}${wanted.slice(1)} is not available for ${base || 'default'} in the installed Codex catalog.`);
+      }
+      return { id: profile.id, name: profile.name.trim(), provider: profile.provider, model: profile.model, reasoningEffort: profile.reasoningEffort ?? null, ...(profile.serviceTier ? { serviceTier: profile.serviceTier } : {}) };
     });
     if (config.workspace !== 'shared') throw new Error('Workers must use the task’s shared workspace.');
     if (config.rosterOnly && (!config.auto || !workers.length)) throw new Error('A named agent team needs at least one model.');
@@ -253,22 +263,39 @@ export function createPreviewArchitect(host: PreviewHost) {
       run.timer = window.setTimeout(() => tick(team, run), 200);
     }
     publish(team);
-    if (batch.every(run => run.worker.status === 'completed') && team.reviewTimer === undefined) {
+    if (batch.every(run => run.worker.status === 'completed') && !host.architectLive(team.snapshot.sessionId) && team.reviewTimer === undefined) {
       host.agent({ sessionId: team.snapshot.sessionId, kind: 'status', text: 'Reviewing sample worker summaries' });
       team.reviewTimer = window.setTimeout(() => review(team), 350);
     }
   }
   function start(sessionId: unknown, text: unknown, imageIds?: unknown): void {
-    const parent = host.parent(sessionId); host.assertIdle(parent);
+    const parent = host.parent(sessionId);
     if (parent.archived || parent.taskStage === 'completed') throw new Error('Reopen this task before starting its team.');
     if (parent.goalState?.status === 'active') throw new Error('Pause the task goal before starting an architect team.');
     get(parent.id);
     const team = teams.get(parent.id);
     if (!team) throw new Error('Configure workers before starting an architect team.');
-    if (['running', 'waiting'].includes(team.snapshot.status)) throw new Error('This team is already active.');
+    const followingUp = ['running', 'waiting'].includes(team.snapshot.status);
+    if (followingUp) {
+      if (host.architectLive(parent.id)) throw new Error('The architect is still working; the message stays queued.');
+    } else host.assertIdle(parent);
     if (typeof text !== 'string' || !text.trim() || new TextEncoder().encode(text).length > 16 * 1024 * 1024) throw new Error('Write a task under 16 MiB.');
     if (imageIds != null && (!Array.isArray(imageIds) || imageIds.length > 8 || imageIds.some(id => typeof id !== 'string'))) throw new Error('Invalid image attachments.');
     applyPending(team);
+    if (followingUp) {
+      host.append(parent.id, 'user', text.trim());
+      parent.status = 'running'; parent.updatedAt = Date.now();
+      host.agent({ sessionId: parent.id, kind: 'status', text: 'Reading your follow-up' });
+      team.turnTimer = window.setTimeout(() => {
+        team.turnTimer = undefined;
+        const output = `I’ll use this follow-up while the sample workers continue. ${sampleNotice}`;
+        host.append(parent.id, 'assistant', output); host.finishTiming(parent.id);
+        host.agent({ sessionId: parent.id, kind: 'text', text: output });
+        host.agent({ sessionId: parent.id, kind: 'done', text: '' });
+        schedule(team);
+      }, 350);
+      return;
+    }
     parent.status = 'running'; parent.taskStage = 'in_progress'; parent.completedAt = null; parent.updatedAt = Date.now();
     if (parent.title === 'New conversation') parent.title = text.trim().slice(0, 48);
     host.append(parent.id, 'user', text.trim());
@@ -290,6 +317,8 @@ export function createPreviewArchitect(host: PreviewHost) {
     host.append(parent.id, 'assistant', planning);
     host.agent({ sessionId: parent.id, kind: 'text', text: planning });
     schedule(team);
+    host.finishTiming(parent.id);
+    host.agent({ sessionId: parent.id, kind: 'done', text: '' });
   }
   function control(sessionId: unknown, action: unknown): TeamSnapshot {
     const parent = host.parent(sessionId); get(parent.id);
@@ -308,10 +337,13 @@ export function createPreviewArchitect(host: PreviewHost) {
         run.worker.status = 'queued';
       }
       host.agent({ sessionId: parent.id, kind: 'status', text: 'Resuming sample workers' });
-      schedule(team); return structuredClone(team.snapshot);
+      host.agent({ sessionId: parent.id, kind: 'done', text: '' });
+      schedule(team);
+      return structuredClone(team.snapshot);
     }
     if (!active(team)) throw new Error('This team is not running.');
     window.clearTimeout(team.reviewTimer); team.reviewTimer = undefined;
+    window.clearTimeout(team.turnTimer); team.turnTimer = undefined;
     for (const run of team.runs) {
       window.clearTimeout(run.timer); run.timer = undefined;
       if (['queued', 'running', 'waiting'].includes(run.worker.status)) {
@@ -348,7 +380,7 @@ export function createPreviewArchitect(host: PreviewHost) {
   function remove(sessionIds: string[]): void {
     for (const sessionId of sessionIds) {
       const team = teams.get(sessionId);
-      if (team) { window.clearTimeout(team.reviewTimer); for (const run of team.runs) window.clearTimeout(run.timer); }
+      if (team) { window.clearTimeout(team.reviewTimer); window.clearTimeout(team.turnTimer); for (const run of team.runs) window.clearTimeout(run.timer); }
       teams.delete(sessionId); configs.delete(sessionId);
     }
     persist();
