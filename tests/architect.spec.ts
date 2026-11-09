@@ -238,7 +238,7 @@ test.describe('architect teams', () => {
     await banner.getByRole('button', { name: 'Continue now' }).click();
     await expect.poll(() => calls(page, 'clear_usage_limit').then(list => list.length)).toBe(1);
     await expect(banner).toHaveCount(0);
-    await expect(panel(page).locator('.architect-panel-summary')).toHaveText('Architect is working…');
+    await expect(panel(page).locator('.architect-panel-summary')).toHaveText('Team is working…');
     const error = panel(page).locator('.architect-panel-error');
     await expect(error).toContainText('tries again');
     await expect(error).toHaveClass(/is-notice/);

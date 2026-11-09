@@ -5,6 +5,8 @@ test.use({ locale: 'en-US', timezoneId: 'UTC' });
 
 const connection = (id: string, name: string, configDir: string | null) => ({ id, provider: 'claude', name, args: [], env: {}, secretEnv: [], configDir, revision: 1 });
 const twoAccounts = [connection('work', 'Claude Work', '/Users/sample/.claude-work'), connection('shared', 'Claude Shared', null)];
+// The copied sign-in command follows the browser's platform: PowerShell on Windows, POSIX elsewhere.
+const onWindows = process.platform === 'win32';
 
 async function openApp(page: Page, connections: unknown[], tasks: Record<string, string> = {}): Promise<string[]> {
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
@@ -400,7 +402,9 @@ test('a Claude sign-in that asks for a code takes it from one field, and a secon
   await fresh.getByRole('button', { name: 'More for Claude account 2', exact: true }).click();
   await page.getByRole('menu', { name: 'Actions for Claude account 2' }).getByRole('menuitem', { name: 'Copy sign-in command' }).click();
   await expect(card.getByRole('status').last()).toHaveText('Command copied.');
-  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`CLAUDE_CONFIG_DIR='/Users/sample/.claude-pandacode-2' claude auth login`);
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(onWindows
+    ? "$env:CLAUDE_CONFIG_DIR='/Users/sample/.claude-pandacode-2'; claude auth login; Remove-Item Env:CLAUDE_CONFIG_DIR"
+    : `CLAUDE_CONFIG_DIR='/Users/sample/.claude-pandacode-2' claude auth login`);
   await code.fill('abc#def');
   await code.press('Enter');
   await expect(fresh).not.toHaveAttribute('data-signed-out');
@@ -409,6 +413,22 @@ test('a Claude sign-in that asks for a code takes it from one field, and a secon
   expect((await calls(page, 'account_sign_in_code')).map((c: any) => c.code)).toEqual(['abc#def']);
   await card.getByRole('button', { name: 'Add a Claude Code account', exact: true }).click();
   await expect(card.locator('[data-pool="claude"] [data-pool-member]').filter({ hasText: 'Claude account 3' })).toHaveCount(1);
+  expect(errors).toEqual([]);
+});
+
+test('the copied sign-in command quotes an apostrophe in the folder on the other platform too', async ({ page }) => {
+  // The test above pins this machine's real platform; simulating the other one here checks the
+  // second branch's quoting exactly (an apostrophe in the config folder) without changing the app.
+  await page.addInitScript(platform => Object.defineProperty(Navigator.prototype, 'platform', { get: () => platform }), onWindows ? 'MacIntel' : 'Win32');
+  const errors = await openApp(page, [connection("o'brien", "Claude O'Brien", "/Users/sample/.claude-o'brien")]);
+  const card = await openConnections(page);
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await card.getByRole('button', { name: "More for Claude O'Brien", exact: true }).click();
+  await page.getByRole('menu', { name: "Actions for Claude O'Brien" }).getByRole('menuitem', { name: 'Copy sign-in command' }).click();
+  await expect(card.getByRole('status').last()).toHaveText('Command copied.');
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(onWindows
+    ? "CLAUDE_CONFIG_DIR='/Users/sample/.claude-o'\\''brien' claude auth login"
+    : "$env:CLAUDE_CONFIG_DIR='/Users/sample/.claude-o''brien'; claude auth login; Remove-Item Env:CLAUDE_CONFIG_DIR");
   expect(errors).toEqual([]);
 });
 
