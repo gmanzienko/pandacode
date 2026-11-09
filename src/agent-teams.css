@@ -39,5 +39,5 @@ html[data-theme="dark"] .agent-team-lead:has(input:checked){color:var(--accent)}
 .agent-guidance,.agent-team-editor input[type=text],.agent-team-filter{background:var(--ds-card-inset)}
 .agent-guidance:focus,.agent-team-editor input[type=text]:focus{box-shadow:0 0 0 2px var(--focus)}
 .agent-team-speed{max-width:30%}
-.agent-team-speed-note{flex-basis:100%;color:var(--muted);font-size:var(--text-xs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.agent-team-speed-note{flex-basis:100%;color:var(--muted);font-size:var(--ds-text-meta);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .agent-team-model:has(.agent-team-speed-note){flex-wrap:wrap;padding-bottom:4px}

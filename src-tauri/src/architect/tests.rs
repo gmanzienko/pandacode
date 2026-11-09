@@ -4090,7 +4090,7 @@ fn a_long_objective_is_kept_whole_as_a_reserved_note_and_quoted_by_head_and_tail
     }
     let objective = format!("START {} END", "Build the parser and its tests. ".repeat(1000));
     assert!(objective.len() > OBJECTIVE_QUOTE);
-    let (_, admission) = start_state(&state, &sid, &objective, None, None).unwrap();
+    let (_, admission, _) = start_state(&state, &sid, &objective, None, None).unwrap();
     // The first turn is reserved by start_state and launched by its caller.
     let (lead, _rx) = claim(&state, Launch { sid: sid.clone(), prompt: objective.clone(), images: None, admission });
     assert!(lead.config.prompt.contains(&objective), "the user's own message is whole");
@@ -4332,7 +4332,7 @@ fn events_leave_out_the_objective_pending_prompt_and_catalogs() {
     let (_store, mut team) = fixture();
     team.objective = "o".repeat(1024);
     team.pending_turn = Some(PendingTurn { prompt: "p".repeat(1024), images: None, reserved: true, reserved_at: storage::now(), kind: None });
-    team.config.catalog = vec![WorkerProfile { id: "m".into(), name: "M".into(), provider: "codex".into(), model: "m".into(), reasoning_effort: None }];
+    team.config.catalog = vec![WorkerProfile { id: "m".into(), name: "M".into(), provider: "codex".into(), model: "m".into(), reasoning_effort: None, service_tier: None }];
     let lean = event_payload(&team);
     assert!(lean.objective.is_empty() && lean.pending_turn.is_none() && lean.config.catalog.is_empty());
     // The remote host's listener parses the same payload back.
@@ -5452,4 +5452,44 @@ fn a_replacement_keeps_an_explicit_profile_tier_over_the_inherited_tier() {
 #[test]
 fn a_fresh_auto_dispatch_keeps_an_implicit_roster_tier() {
     check_fast_roster_dispatch(json!({"profileId":"auto"}), false, true, "fast", "priority");
+}
+
+#[test]
+fn a_user_followup_reservation_is_young_to_the_watchdog_and_blocks_scheduler_wakes() {
+    let (state, sid, worker) = followup_fixture();
+    let before = team_of(&state, &sid);
+    let started = storage::now();
+    let (team, admission, followup) = start_state(&state, &sid, "Check the edge case", None, None).unwrap();
+    assert!(followup);
+    assert!(team.pending_turn.as_ref().unwrap().reserved_at >= started);
+    watchdog::reconcile(&state, storage::now(), &mut |_| {}).unwrap();
+    assert!(team_of(&state, &sid).pending_turn.unwrap().reserved);
+    // A settled worker must not replace the user's reserved turn with a review wake.
+    finish(&state, &worker, "Edge case covered", true);
+    assert!(next_action_state(&state, &mut |_| {}).unwrap().is_none());
+    let after = team_of(&state, &sid);
+    assert_eq!((after.generation, after.objective), (before.generation, before.objective));
+    assert_eq!(after.pending_turn.unwrap().prompt, "Check the edge case");
+    fail_followup_state(&state, &admission, &mut |_| {});
+    let review = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    assert_eq!(review.sid, sid);
+    assert!(review.prompt.contains("Edge case covered"));
+}
+
+#[test]
+fn an_active_team_user_followup_keeps_its_council_cycle() {
+    let (state, sid, _worker) = followup_fixture();
+    let before = {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.config.council = Some(Default::default());
+        team.council_since = storage::now();
+        save(&store, &mut team).unwrap();
+        team
+    };
+    let (after, _, followup) = start_state(&state, &sid, "Also inspect the edge case", None, None).unwrap();
+    assert!(followup);
+    assert_eq!(after.config.council, before.config.council);
+    assert_eq!(after.council_since, before.council_since);
+    assert_eq!((after.generation, after.objective), (before.generation, before.objective));
 }

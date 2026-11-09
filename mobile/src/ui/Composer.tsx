@@ -99,7 +99,7 @@ export function Composer({ deviceId, sessionId, running, waiting, team, bot }: {
   const [widths, setWidths] = useState(NO_WIDTHS);
   const measured = (item: keyof TrayWidths) => (width: number) => setWidths(w => (w[item] === width ? w : { ...w, [item]: width }));
   // Steering belongs to one run: it ends with the run, and sending a steer finishes it.
-  if (steer && !running) setSteer(false);
+  if (steer && (!running || team)) setSteer(false);
   const focused = useSharedValue(0);
   const focusRing = useAnimatedStyle(() => ({ opacity: focused.get() }));
   const labels = useSettingsLabels(deviceId, sessionId);

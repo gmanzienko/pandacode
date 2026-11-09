@@ -11,7 +11,7 @@ fn turning_council_on_reviews_only_what_comes_next() {
     persist_turn(&state, &sid, &["index.html"]);
     std::thread::sleep(std::time::Duration::from_millis(3));
     council::set(&state, &sid, Some(on(9.0, 0, 0))).unwrap();
-    let (_, admission) = start_state(&state, &sid, "What does it do?", None, None).unwrap();
+    let (_, admission, _) = start_state(&state, &sid, "What does it do?", None, None).unwrap();
     let (lead, _rx) = claim(&state, Launch { sid: sid.clone(), prompt: "What does it do?".into(), images: None, admission });
     finish(&state, &lead, "It does X.", true);
     assert!(next_action_state(&state, &mut |_| {}).unwrap().is_none(), "a plain answer is not woken");
@@ -424,7 +424,7 @@ fn a_reviewers_sub_workers_do_not_outdate_its_round() {
     };
     let coordination::Actor::Worker { id, attempt } = actor else { panic!("a worker") };
     let generation = saved(&state, &sid).generation;
-    dispatch_as(&state, &sid, generation, Some((&id, attempt)), "pandacode_dispatch_workers", json!({"assignments":[{"key":"render","profileId":"fast","name":"render","prompt":"Render frames.","files":[],"readOnly":true}]}), &AtomicBool::new(false), &routing::AutoRoutes::default()).unwrap();
+    dispatch_as(&state, &sid, generation, Some((&id, attempt)), "pandacode_dispatch_workers", json!({"assignments":[{"key":"render","profileId":"fast","name":"render","prompt":"Render frames.","files":[],"readOnly":true}]}), &AtomicBool::new(false), &routing::AutoRoutes::default(), &None).unwrap();
     let child = saved(&state, &sid).workers[1].session_id.clone();
     let mut team = saved(&state, &sid);
     team.workers[0].council.as_mut().unwrap().started_at = storage::now() - 100;

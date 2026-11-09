@@ -318,7 +318,8 @@ pub(super) fn diversify(reviewers: &[String], mut taken: Vec<(String, String)>, 
     for key in reviewers {
         let Some(Ok(route)) = routes.get_mut(key) else { continue };
         let Some(current) = opening_rung(None, &route.failed, route.mode, &route.ladder).or(route.pick.as_ref()).cloned() else { continue };
-        let free = |m: &&Routed| !taken.iter().any(|(provider, model)| *provider == m.provider && *model == m.model);
+        let free = |m: &&Routed| !taken.iter().any(|(provider, model)| *provider == m.provider
+            && crate::panda_router::base_model(provider, model) == crate::panda_router::base_model(&m.provider, &m.model));
         let mut chosen = current.clone();
         if !free(&&current) {
             let at = route.ladder.iter().position(|m| m.card_id == current.card_id).map_or(0, |i| i + 1);
@@ -631,6 +632,14 @@ mod council_diversity_tests {
     }
 
     #[test]
+    fn speed_variants_of_one_codex_model_are_not_reviewer_diversity() {
+        let mut routes = AutoRoutes::new();
+        routes.insert("r".into(), route(Mode::Balanced, rung("codex", "m"), vec![rung("codex", "m"), rung("codex", "m@fast"), rung("codex", "other")]));
+        diversify(&keys(&["r"]), vec![("codex".into(), "m@ultrafast".into())], &mut routes);
+        assert_eq!(pinned(&routes, "r").as_deref(), Some("codex/other"));
+    }
+
+    #[test]
     fn explicitly_staffed_reviewers_count_as_taken() {
         let mut routes = AutoRoutes::new();
         routes.insert("r1".to_string(), route(Mode::Balanced, rung("a", "1"), vec![rung("a", "1"), rung("b", "2")]));
@@ -642,7 +651,7 @@ mod council_diversity_tests {
     fn a_replacement_that_inherits_its_lens_is_a_reviewer_and_explicit_ones_are_taken() {
         let mut team = crate::architect::new_team("lead".into(), TeamConfig {
             auto: false, roster_only: false, name: None,
-            workers: vec![WorkerProfile { id: "fast".into(), name: "Fast".into(), provider: "codex".into(), model: "m".into(), reasoning_effort: None }],
+            workers: vec![WorkerProfile { id: "fast".into(), name: "Fast".into(), provider: "codex".into(), model: "m".into(), reasoning_effort: None, service_tier: None }],
             catalog: vec![], max_parallel: 0, max_rounds: 0, max_assignments: 0, workspace: "shared".into(), summary_limit: 0, lead_guidance: None,
             council: Some(Default::default()),
         });

@@ -436,7 +436,7 @@ fn saved_profiles_never_keep_a_team_catalog_but_the_last_setup_does() {
     let store = Store::open(std::path::Path::new(":memory:")).unwrap();
     let mut setup = setup();
     setup.config.auto = true;
-    setup.config.catalog = (0..1000).map(|i| WorkerProfile { id: format!("m{i}"), name: format!("Model {i}"), provider: "codex".into(), model: format!("model-{i}"), reasoning_effort: None }).collect();
+    setup.config.catalog = (0..1000).map(|i| WorkerProfile { id: format!("m{i}"), name: format!("Model {i}"), provider: "codex".into(), model: format!("model-{i}"), reasoning_effort: None, service_tier: None }).collect();
     let id = save_profile(&store, None, "Auto".into(), setup.clone()).unwrap().profiles[0].id.clone();
     // The profile matches the setup it was saved from, catalog and all.
     remember(&store, Some(setup.clone()), Some(&id)).unwrap();
@@ -451,7 +451,7 @@ fn a_new_task_inheriting_an_auto_team_keeps_its_catalog() {
     let new = task(&store);
     let mut setup = setup();
     setup.config.auto = true;
-    setup.config.catalog = (0..100).map(|i| WorkerProfile { id: format!("m{i}"), name: format!("Model {i}"), provider: "codex".into(), model: format!("model-{i}"), reasoning_effort: None }).collect();
+    setup.config.catalog = (0..100).map(|i| WorkerProfile { id: format!("m{i}"), name: format!("Model {i}"), provider: "codex".into(), model: format!("model-{i}"), reasoning_effort: None, service_tier: None }).collect();
     remember(&store, Some(setup), None).unwrap();
     let team = apply_default(&store, &new.id).unwrap().unwrap();
     assert_eq!(team.config.catalog.len(), 100, "it routes over every model, not just the roster");
