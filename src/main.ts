@@ -2722,7 +2722,7 @@ function renderComposer(): void {
   // Re-rendering replaces the textarea; keep typing focus and the caret, since people type while agents work.
   const typing = oldPrompt && document.activeElement === oldPrompt ? { id: oldPrompt.dataset.sessionId, start: oldPrompt.selectionStart, end: oldPrompt.selectionEnd } : null;
   // The swap below would drop focus on Steer, its ✕ and pencil, or Stop to <body>.
-  const barControl = document.activeElement?.closest<HTMLElement>('#composer-area :is(.composer-steer-bar [data-action],[data-action="stop"])')?.dataset.action;
+  const barControl = document.activeElement?.closest<HTMLElement>('#composer-area :is(.composer-steer-bar [data-action],[data-action="stop"],[data-action="council-strip-toggle"])')?.dataset.action;
   const hadSteerBar = oldPrompt?.dataset.sessionId === session()?.id && Boolean(document.querySelector('#composer-area .composer-steer-bar'));
   if (state.sharedChannelId) {
     const channel = state.sharedChannelDetail;
@@ -2790,7 +2790,7 @@ function renderComposer(): void {
   // Writing an unchanged value would still clear the reused field's undo history in some engines.
   if (prompt) { if (prompt.value !== previous) prompt.value = previous; prompt.disabled = state.messagesLoading || Boolean(state.messagesError) || Boolean(finishingStreams.get(s.id)?.error); }
   if (prompt && typing?.id === s.id && !prompt.disabled) { prompt.focus({ preventScroll: true }); prompt.setSelectionRange(typing.start, typing.end); }
-  if (barControl) {
+  if (barControl && (barControl !== 'council-strip-toggle' || oldPrompt?.dataset.sessionId === s.id)) {
     // Redrawn while the run goes on: the same control keeps focus. Gone or hidden: the prompt takes it.
     const again = document.querySelector<HTMLElement>(`#composer-area [data-action="${barControl}"]`);
     again?.focus({ preventScroll: true });

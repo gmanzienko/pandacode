@@ -374,9 +374,12 @@ test('the panel places itself again when its content changes', async ({ page }) 
   await button(page).click();
   await toggle(page).click();
   await expect(toggle(page)).toBeChecked();
-  const [p, b] = await Promise.all([panel(page).boundingBox(), button(page).boundingBox()]);
-  expect(p!.y).toBeGreaterThanOrEqual(0);
-  expect(p!.y + p!.height).toBeLessThanOrEqual(b!.y);
+  await expect.poll(() => page.evaluate(() => {
+    const panel = document.querySelector('.council-panel'), button = document.querySelector('.composer-council-button');
+    if (!panel || !button) return null;
+    const p = panel.getBoundingClientRect(), b = button.getBoundingClientRect();
+    return p.top >= 0 && p.bottom <= b.top;
+  })).toBe(true);
 });
 
 test('an open tooltip follows the composer button when its name changes', async ({ page }) => {
@@ -542,6 +545,47 @@ test('expand and collapse: the reviewers of the latest scored round, remembered 
   await expect(rows).toHaveCount(0);
 });
 
+test('keyboard thread switches from Council keep cached destinations out of the prompt', async ({ page }) => {
+  await page.route('**/src/preview.ts*', async route => {
+    const response = await route.fetch();
+    const body = (await response.text()).replace(/const providers\s*=/, `
+      for (const id of ['session-2', 'session-3']) messages[id] = [{ id: id === 'session-2' ? 20 : 30, sessionId: id, role: 'assistant', content: 'Saved thread history', createdAt: now - 1000 }];
+      $&`);
+    await route.fulfill({ response, body });
+  });
+  await page.goto('/?council=fixing');
+  const row = (id: string) => page.locator(`#navigation .task-item[data-id="${id}"]`);
+  const prompt = page.locator('#prompt');
+  // Visit both destinations so the shortcut renders their cached, enabled composer immediately.
+  for (const id of ['session-2', 'session-3', 'session-1']) {
+    await row(id).click();
+    await expect(prompt).toHaveAttribute('data-session-id', id);
+    await expect(prompt).toBeEnabled();
+    await composerSettled(page);
+  }
+  await disclosure(page).focus();
+  const mod = process.platform === 'darwin' ? 'Meta' : 'Control';
+  for (const id of ['session-2', 'session-3']) {
+    await page.keyboard.press(`${mod}+Shift+BracketRight`);
+    await expect(row(id)).toHaveAttribute('aria-current', 'page');
+    await expect(prompt).toHaveAttribute('data-session-id', id);
+    await expect(prompt).toBeEnabled();
+    await expect(strip(page)).toHaveCount(0);
+    await expect(prompt).not.toBeFocused();
+  }
+});
+
+test('New task from Council still focuses the new thread prompt', async ({ page }) => {
+  await open(page, '/?council=fixing');
+  await composerSettled(page);
+  await disclosure(page).focus();
+  const mod = process.platform === 'darwin' ? 'Meta' : 'Control';
+  await page.keyboard.press(`${mod}+n`);
+  await expect(page.locator('#prompt')).not.toHaveAttribute('data-session-id', 'session-1');
+  await expect(strip(page)).toHaveCount(0);
+  await expect(page.locator('#prompt')).toBeFocused();
+});
+
 test('a running round shows a pulse; a settled cycle reads first → final', async ({ page }) => {
   await open(page, '/?council');
   await disclosure(page).click();
@@ -565,6 +609,12 @@ test('asking: Keep fixing sends once, the strip reads fixing at once, and focus 
   await expect(strip(page).locator('.council-strip-state')).toHaveText('Round 1 of 10 · fixing');
   await expect(strip(page).getByRole('button', { name: 'Keep fixing' })).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => (window as any).__councilStarts ?? [])).toEqual(['Keep fixing until every reviewer reaches the target.']);
+  await expect(disclosure(page)).toBeFocused();
+  // A later same-thread refresh replaces the strip after the action has handed it focus.
+  expect(await disclosure(page).evaluate(node => {
+    window.dispatchEvent(new Event('pandacode-github-change'));
+    return node.isConnected;
+  })).toBe(false);
   await expect(disclosure(page)).toBeFocused();
 });
 
