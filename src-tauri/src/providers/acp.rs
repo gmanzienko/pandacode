@@ -451,6 +451,24 @@ impl Protocol {
                     return Ok(step);
                 }
             }
+            // Qoder's native plan mode does not gate writes itself, so this
+            // policy is the enforcement.
+            if self.config.provider == "qoder" {
+                let tool = &value["params"]["toolCall"];
+                if let Some(wanted) = super::qoder::permission(&self.config.mode, field(tool, "kind")) {
+                    let selected = options.and_then(|values| values.iter().find(|entry| entry["kind"] == wanted));
+                    let outcome = match selected {
+                        Some(selected) => json!({"outcome":"selected","optionId":selected["optionId"]}),
+                        None => json!({"outcome":"cancelled"}),
+                    };
+                    if wanted == "reject_once" {
+                        let title = model_text(tool["title"].as_str(), "a state-changing action", 200);
+                        step.events.push(self.event("status", format!("Plan mode declined: {title}"), None));
+                    }
+                    step.write.push(json!({"jsonrpc":"2.0","id":value["id"],"result":{"outcome":outcome}}));
+                    return Ok(step);
+                }
+            }
             if deepseek && self.config.mode == "plan" {
                 // dsh runs read-only here and asks only to escalate past it.
                 if let Some(selected) = options.and_then(|values| values.iter().find(|entry| entry["kind"] == "reject_once")) {
@@ -690,6 +708,8 @@ impl Protocol {
             &[super::commandcode::mode_id(&self.config.mode)]
         } else if self.config.provider == "kilo" {
             &[super::kilo::mode_id(&self.config.mode)]
+        } else if self.config.provider == "qoder" {
+            &[super::qoder::mode_id(&self.config.mode)]
         } else if self.config.provider == "devin" {
             &[super::devin::mode_id(&self.config.mode)]
         } else if self.config.provider == "hermes" {
@@ -748,7 +768,7 @@ impl Protocol {
         };
         // On these harnesses the ACP mode is the approval policy, so a missing
         // one must fail the run rather than silently widen access.
-        let permission_modes = matches!(self.config.provider.as_str(), "opencode" | "kilo" | "commandcode" | "cline" | "devin");
+        let permission_modes = matches!(self.config.provider.as_str(), "opencode" | "kilo" | "qoder" | "commandcode" | "cline" | "devin");
         if let Some(option) = options(&self.acp_config, "mode") {
             let found = candidates
                 .iter()
@@ -777,10 +797,10 @@ impl Protocol {
                 return Err("This harness does not advertise the selected task mode.".into());
             }
             self.mode_fallback()?;
-        } else if self.config.mode == "plan" || matches!(self.config.provider.as_str(), "kilo" | "devin") {
+        } else if self.config.mode == "plan" || matches!(self.config.provider.as_str(), "kilo" | "qoder" | "devin") {
             // With no mode information at all (a bare resumed session, for
             // instance) the run still fails rather than guess.
-            return Err(if matches!(self.config.provider.as_str(), "kilo" | "devin") {
+            return Err(if matches!(self.config.provider.as_str(), "kilo" | "qoder" | "devin") {
                 "This harness does not advertise the selected task mode."
             } else {
                 "This harness does not advertise a read-only planning mode."

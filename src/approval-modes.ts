@@ -29,6 +29,8 @@ export function approvalModes(provider: ProviderId, current?: Mode): ApprovalMod
     ? 'Cline acts; reads and searches run, PandaCode asks before edits, commands and other tools.'
     : provider === 'kilo'
     ? 'Kilo runs read-only tools; PandaCode asks before edits, commands and other tools.'
+    : provider === 'qoder'
+    ? 'Qoder runs read-only tools; PandaCode asks before edits, commands and other tools.'
     : provider === 'muse'
     ? 'Muse asks before actions its rules do not allow. Its own reviewer may approve low-risk ones.'
     : provider === 'zcode'
@@ -76,7 +78,7 @@ export function approvalModes(provider: ProviderId, current?: Mode): ApprovalMod
     ? { id: 'auto', label: 'Accept edits', icon: 'edit', description: 'Work freely inside the sandbox. Muse asks only to leave it.' }
     : provider === 'deepseek'
     ? { id: 'auto', label: 'Accept edits', icon: 'edit', description: 'Like Standard, and edits outside this project are approved too. Other actions still ask.' }
-    : ['claude', 'glm', 'mimo', 'alibaba', 'opencode', 'grok', 'pi', 'omp', 'commandcode', 'cline', 'kilo', 'zcode', 'hermes'].includes(provider)
+    : ['claude', 'glm', 'mimo', 'alibaba', 'opencode', 'grok', 'pi', 'omp', 'commandcode', 'cline', 'kilo', 'qoder', 'zcode', 'hermes'].includes(provider)
     ? { id: 'auto', label: 'Accept edits', icon: 'edit', description: 'Allow file edits automatically. Other actions may still ask you.' }
     : provider === 'kimi'
     ? { id: 'auto', label: 'Ask when needed', icon: 'spark', description: 'Allow routine tools automatically. Ask you about sensitive actions.' }
@@ -95,6 +97,8 @@ export function approvalModes(provider: ProviderId, current?: Mode): ApprovalMod
     ? { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Cline’s Plan mode: it explores, fetches and proposes a plan; file edits are declined, commands still ask.' }
     : provider === 'kilo'
     ? { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Read-only: Kilo investigates and plans; edits, commands and other state-changing tools are declined.' }
+    : provider === 'qoder'
+    ? { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Read-only: Qoder investigates and plans; edits, commands and other state-changing tools are declined.' }
     : provider === 'muse'
     ? { id: 'plan', label: 'Plan mode', icon: 'plan', description: 'Read-only: Muse cannot write files or run shell commands, and proposes a plan.' }
     : provider === 'commandcode'
