@@ -2,6 +2,10 @@
 //! its permission modes, and models that support it report their own reasoning
 //! efforts. Credentials stay with the installed Qoder CLI.
 use super::*;
+use crate::slash_commands::claude::Pipe;
+
+const STARTUP: Duration = Duration::from_secs(60);
+const CLEANUP: Duration = Duration::from_secs(2);
 
 /// Shown when Qoder has no stored sign-in.
 pub(super) const SIGN_IN: &str =
@@ -40,6 +44,155 @@ pub(super) fn permission(mode: &str, kind: &str) -> Option<&'static str> {
         _ if mode == "full" => Some("allow_once"),
         _ => None,
     }
+}
+
+fn command(path: &Path) -> Result<Command, String> {
+    let mut command = super::provider_command("qoder", path)?;
+    configure(&mut command);
+    Ok(command)
+}
+
+fn initialize() -> Value {
+    json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"pandacode","version":"0.1.0"}}})
+}
+
+fn session_error(frame: &Value) -> String {
+    if frame["error"]["code"] == -32000 {
+        SIGN_IN.into()
+    } else {
+        acp::rpc_error(frame, "session creation")
+    }
+}
+
+fn transport(pipe: &Pipe) -> String {
+    if pipe.timed_out() {
+        acp::ACP_STARTUP_TIMEOUT.into()
+    } else {
+        "Qoder's ACP server ended before it answered. Check the Qoder installation and sign-in, then refresh.".into()
+    }
+}
+
+/// Sends one request and reads its reply. `config_option_update` notifications
+/// arrive before the reply and are skipped; the reply is the source of truth.
+async fn request(pipe: &mut Pipe, frame: &Value) -> Result<Value, String> {
+    pipe.send(frame).await.map_err(|_| transport(pipe))?;
+    loop {
+        let reply = pipe.read().await.map_err(|_| transport(pipe))?;
+        if reply.get("method").is_some() {
+            if reply.get("id").is_some() {
+                let _ = pipe.send(&json!({"jsonrpc":"2.0","id":reply["id"],"error":{"code":-32601,"message":"Metadata discovery does not execute requests"}})).await;
+            }
+            continue;
+        }
+        if reply["id"] == frame["id"] {
+            return Ok(reply);
+        }
+    }
+}
+
+async fn probe(path: &Path) -> Result<(Value, HashMap<String, Value>), String> {
+    let cwd = std::env::temp_dir();
+    let mut pipe = Pipe::spawn(command(path)?, &cwd, STARTUP)
+        .map_err(|_| "Could not start Qoder's ACP server. Check the selected executable.".to_owned())?;
+    let result = probe_frames(&mut pipe, &cwd).await;
+    pipe.finish().await;
+    result.map_err(|error| super::diagnostics::failure(&error, pipe.diagnostic()))
+}
+
+/// One session switches through every model in order (each switch answers in
+/// about a millisecond), then is deleted so it never appears in Qoder's history.
+async fn probe_frames(pipe: &mut Pipe, cwd: &Path) -> Result<(Value, HashMap<String, Value>), String> {
+    let init = request(pipe, &initialize()).await?;
+    if init.get("error").is_some() {
+        return Err(acp::rpc_error(&init, "initialize"));
+    }
+    if init["result"]["protocolVersion"] != 1 {
+        return Err("This Qoder version does not support ACP protocol v1. Update Qoder.".into());
+    }
+    let created = request(pipe, &json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":launch::external_path(cwd),"mcpServers":[]}})).await?;
+    if created.get("error").is_some() {
+        return Err(session_error(&created));
+    }
+    let session = created["result"].clone();
+    let id = field(&session, "sessionId");
+    if id.is_empty() || id.len() > 256 {
+        return Err("Qoder did not return a session ID.".into());
+    }
+    let ids: Vec<String> = acp::options(&session, "model")
+        .map(acp::choices)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|choice| field(choice, "value").to_owned())
+        .filter(|id| valid_model_id(id))
+        .collect();
+    let mut efforts = HashMap::new();
+    let walk = async {
+        for (index, model) in ids.iter().enumerate() {
+            let reply = request(pipe, &json!({"jsonrpc":"2.0","id":100 + index as u64,"method":"session/set_config_option","params":{"sessionId":id,"configId":"model","value":model}})).await?;
+            if reply.get("error").is_some() {
+                return Err(acp::rpc_error(&reply, "model switch"));
+            }
+            efforts.insert(model.clone(), reply["result"].clone());
+        }
+        Ok(())
+    }
+    .await;
+    // Delete even when the walk failed, so an early error leaves no session behind.
+    pipe.set_deadline_after(CLEANUP);
+    let _ = request(pipe, &json!({"jsonrpc":"2.0","id":9000,"method":"session/delete","params":{"sessionId":id}})).await;
+    walk?;
+    Ok((session, efforts))
+}
+
+/// Models with their own efforts. No prompt is sent and no inference runs.
+pub(super) async fn models(path: &Path) -> Result<Vec<ModelInfo>, String> {
+    if let Some(models) = acp_catalog::get("qoder", path) { return Ok(models); }
+    let _refresh = acp_catalog::refresh_lock("qoder", path).await;
+    if let Some(models) = acp_catalog::get("qoder", path) { return Ok(models); }
+    let discovery = acp_catalog::begin("qoder", path);
+    let (session, efforts) = probe(path).await?;
+    let models = catalog(&session, &efforts);
+    acp_catalog::store_models(discovery, models.clone());
+    Ok(models)
+}
+
+/// Builds the picker catalog from a `session/new` result and each model's
+/// `set_config_option` reply result. The `reasoning_effort` option shares the
+/// `model` category, so it is looked up by its exact id; a reply without one
+/// means the model has no efforts.
+pub(super) fn catalog(session: &Value, efforts: &HashMap<String, Value>) -> Vec<ModelInfo> {
+    let mut models = vec![ModelInfo::default_choice()];
+    let Some(option) = acp::options(session, "model") else { return models };
+    for choice in acp::choices(option) {
+        let id = field(choice, "value");
+        if !valid_model_id(id) {
+            continue;
+        }
+        let reply = efforts.get(id).unwrap_or(&Value::Null);
+        let effort = acp::options(reply, "reasoning_effort").unwrap_or(&Value::Null);
+        let reasoning_efforts: Vec<ReasoningEffortInfo> = acp::choices(effort)
+            .into_iter()
+            .filter_map(|choice| {
+                let id = field(choice, "value");
+                validate_reasoning_effort("qoder", Some(id)).ok()?;
+                Some(effort_info(id, None))
+            })
+            .collect();
+        let default_reasoning_effort = effort["currentValue"]
+            .as_str()
+            .filter(|value| reasoning_efforts.iter().any(|effort| effort.id == *value))
+            .map(str::to_owned);
+        models.push(ModelInfo {
+            speed_tiers: Vec::new(),
+            id: id.into(),
+            name: model_text(choice["name"].as_str(), id, 160),
+            description: model_text(choice["description"].as_str(), "", 500),
+            reasoning_efforts,
+            default_reasoning_effort,
+            context_window: None,
+        });
+    }
+    models
 }
 
 #[cfg(test)]
@@ -283,5 +436,146 @@ mod tests {
             let error = p.acp(json!({"jsonrpc":"2.0","id":2,"result":{"sessionId":"ses_qoder_test"}})).err().unwrap();
             assert_eq!(error, "This harness does not advertise the selected task mode.", "{mode}");
         }
+    }
+
+    /// Recorded `session/new` result from `qodercli --acp` 1.1.13; session ID
+    /// anonymized. The CLI's current model is `auto`, which has no effort option.
+    fn session_new() -> Value {
+        json!({"sessionId":"ses_qoder_test",
+            "modes":{"availableModes":[
+                {"id":"default","name":"Default","description":"Prompts for approval"},
+                {"id":"acceptEdits","name":"Accept Edits","description":"Auto-approves edit tools"},
+                {"id":"bypassPermissions","name":"Bypass Permissions","description":"Auto-approves all tools"},
+                {"id":"plan","name":"Plan","description":"Read-only mode"}],"currentModeId":"default"},
+            "models":{"availableModels":[
+                {"modelId":"auto","name":"Auto (default)","description":"Vision · 0.50x Credit"},
+                {"modelId":"ultimate","name":"Ultimate","description":"Reasoning · Vision · 0.40x Credit"},
+                {"modelId":"efficient","name":"Efficient","description":"Vision · 0.30x Credit"},
+                {"modelId":"smodel","name":"Sonus","description":"Reasoning · Vision · New · 8.00x Credit"},
+                {"modelId":"cmodel","name":"Cantus","description":"Reasoning · Vision · New · 4.00x Credit"},
+                {"modelId":"qmodel_latest","name":"Qwen4-Max-Preview","description":"Reasoning · Vision · New · 0.10x Credit"},
+                {"modelId":"qmodel_38max","name":"Qwen3.8-Max","description":"Reasoning · Vision · New · 0.20x Credit"},
+                {"modelId":"qfmodel","name":"Qwen3.8-Flash","description":"Reasoning · Vision · New · 0.04x Credit"},
+                {"modelId":"kmodel_latest","name":"Kimi-K3.1-Pro","description":"Vision · New · 1.00x Credit"},
+                {"modelId":"kmodel","name":"Kimi-K2.8-Preview","description":"Vision · New · 0.80x Credit"},
+                {"modelId":"gmodel","name":"GLM-5.3","description":"Reasoning · Vision · New · 0.80x Credit"},
+                {"modelId":"gfmodel","name":"GLM-5.3-Flash","description":"Reasoning · Vision · New · 0.10x Credit"},
+                {"modelId":"dmodel","name":"DeepSeek-V4-Pro","description":"Reasoning · Vision · New · 0.50x Credit"},
+                {"modelId":"dfmodel","name":"DeepSeek-Flash","description":"Reasoning · Vision · New · 0.10x Credit"},
+                {"modelId":"mmodel","name":"MiniMax-M3.1-Flash","description":"Reasoning · Vision · New · 0.10x Credit"}],
+                "currentModelId":"auto"},
+            "configOptions":[
+                {"type":"select","id":"mode","name":"Mode","category":"mode","currentValue":"default","options":[
+                    {"value":"default","name":"Default","description":"Prompts for approval"},
+                    {"value":"acceptEdits","name":"Accept Edits","description":"Auto-approves edit tools"},
+                    {"value":"bypassPermissions","name":"Bypass Permissions","description":"Auto-approves all tools"},
+                    {"value":"plan","name":"Plan","description":"Read-only mode"}]},
+                {"type":"select","id":"model","name":"Model","category":"model","currentValue":"auto","options":[
+                    {"value":"auto","name":"Auto (default)","description":"Vision · 0.50x Credit"},
+                    {"value":"ultimate","name":"Ultimate","description":"Reasoning · Vision · 0.40x Credit"},
+                    {"value":"efficient","name":"Efficient","description":"Vision · 0.30x Credit"},
+                    {"value":"smodel","name":"Sonus","description":"Reasoning · Vision · New · 8.00x Credit"},
+                    {"value":"cmodel","name":"Cantus","description":"Reasoning · Vision · New · 4.00x Credit"},
+                    {"value":"qmodel_latest","name":"Qwen4-Max-Preview","description":"Reasoning · Vision · New · 0.10x Credit"},
+                    {"value":"qmodel_38max","name":"Qwen3.8-Max","description":"Reasoning · Vision · New · 0.20x Credit"},
+                    {"value":"qfmodel","name":"Qwen3.8-Flash","description":"Reasoning · Vision · New · 0.04x Credit"},
+                    {"value":"kmodel_latest","name":"Kimi-K3.1-Pro","description":"Vision · New · 1.00x Credit"},
+                    {"value":"kmodel","name":"Kimi-K2.8-Preview","description":"Vision · New · 0.80x Credit"},
+                    {"value":"gmodel","name":"GLM-5.3","description":"Reasoning · Vision · New · 0.80x Credit"},
+                    {"value":"gfmodel","name":"GLM-5.3-Flash","description":"Reasoning · Vision · New · 0.10x Credit"},
+                    {"value":"dmodel","name":"DeepSeek-V4-Pro","description":"Reasoning · Vision · New · 0.50x Credit"},
+                    {"value":"dfmodel","name":"DeepSeek-Flash","description":"Reasoning · Vision · New · 0.10x Credit"},
+                    {"value":"mmodel","name":"MiniMax-M3.1-Flash","description":"Reasoning · Vision · New · 0.10x Credit"}]}]})
+    }
+
+    /// Each model's recorded `session/set_config_option` reply result (CLI
+    /// 1.1.13). Every reply repeats `session_new`'s `mode` and `model` options
+    /// byte-for-byte with `model.currentValue` set to the switched model, then
+    /// appends the recorded `reasoning_effort` option pasted below; `auto` and
+    /// `efficient` replied without one.
+    fn efforts() -> HashMap<String, Value> {
+        let base = session_new()["configOptions"].as_array().unwrap().clone();
+        let mut efforts = HashMap::new();
+        for (model, option) in [
+            ("auto", Value::Null),
+            ("ultimate", json!({"type":"select","id":"reasoning_effort","name":"Reasoning Effort","category":"model","currentValue":"xhigh","options":[{"value":"xhigh","name":"Extra High"},{"value":"high","name":"High"},{"value":"low","name":"Low"},{"value":"max","name":"Max"},{"value":"medium","name":"Medium"}]})),
+            ("efficient", Value::Null),
+            ("smodel", json!({"type":"select","id":"reasoning_effort","name":"Reasoning Effort","category":"model","currentValue":"xhigh","options":[{"value":"xhigh","name":"Extra High"},{"value":"high","name":"High"},{"value":"low","name":"Low"},{"value":"max","name":"Max"},{"value":"medium","name":"Medium"}]})),
+            ("cmodel", json!({"type":"select","id":"reasoning_effort","name":"Reasoning Effort","category":"model","currentValue":"xhigh","options":[{"value":"xhigh","name":"Extra High"},{"value":"high","name":"High"},{"value":"low","name":"Low"},{"value":"max","name":"Max"},{"value":"medium","name":"Medium"}]})),
+            ("qmodel_latest", json!({"type":"select","id":"reasoning_effort","name":"Reasoning Effort","category":"model","currentValue":"xhigh","options":[{"value":"xhigh","name":"Extra High"},{"value":"high","name":"High"},{"value":"low","name":"Low"},{"value":"none","name":"None"}]})),
+            ("qmodel_38max", json!({"type":"select","id":"reasoning_effort","name":"Reasoning Effort","category":"model","currentValue":"xhigh","options":[{"value":"xhigh","name":"Extra High"},{"value":"low","name":"Low"},{"value":"medium","name":"Medium"},{"value":"none","name":"None"}]})),
+            ("qfmodel", json!({"type":"select","id":"reasoning_effort","name":"Reasoning Effort","category":"model","currentValue":"xhigh","options":[{"value":"xhigh","name":"Extra High"},{"value":"low","name":"Low"},{"value":"medium","name":"Medium"},{"value":"none","name":"None"}]})),
+            ("kmodel_latest", json!({"type":"select","id":"reasoning_effort","name":"Reasoning Effort","category":"model","currentValue":"high","options":[{"value":"high","name":"High"},{"value":"low","name":"Low"},{"value":"max","name":"Max"}]})),
+            ("kmodel", json!({"type":"select","id":"reasoning_effort","name":"Reasoning Effort","category":"model","currentValue":"high","options":[{"value":"high","name":"High"},{"value":"low","name":"Low"},{"value":"max","name":"Max"}]})),
+            ("gmodel", json!({"type":"select","id":"reasoning_effort","name":"Reasoning Effort","category":"model","currentValue":"high","options":[{"value":"high","name":"High"},{"value":"low","name":"Low"},{"value":"max","name":"Max"}]})),
+            ("gfmodel", json!({"type":"select","id":"reasoning_effort","name":"Reasoning Effort","category":"model","currentValue":"high","options":[{"value":"high","name":"High"},{"value":"max","name":"Max"}]})),
+            ("dmodel", json!({"type":"select","id":"reasoning_effort","name":"Reasoning Effort","category":"model","currentValue":"high","options":[{"value":"high","name":"High"},{"value":"max","name":"Max"},{"value":"none","name":"None"}]})),
+            ("dfmodel", json!({"type":"select","id":"reasoning_effort","name":"Reasoning Effort","category":"model","currentValue":"high","options":[{"value":"high","name":"High"},{"value":"max","name":"Max"},{"value":"low","name":"Low"},{"value":"none","name":"None"}]})),
+            ("mmodel", json!({"type":"select","id":"reasoning_effort","name":"Reasoning Effort","category":"model","currentValue":"xhigh","options":[{"value":"xhigh","name":"Extra High"},{"value":"high","name":"High"},{"value":"low","name":"Low"},{"value":"max","name":"Max"},{"value":"medium","name":"Medium"}]})),
+        ] {
+            let mut options = base.clone();
+            options.iter_mut().find(|option| option["id"] == "model").unwrap()["currentValue"] = json!(model);
+            if !option.is_null() {
+                options.push(option);
+            }
+            efforts.insert(model.to_owned(), json!({"configOptions": options}));
+        }
+        efforts
+    }
+
+    #[test]
+    fn catalog_keeps_default_and_every_advertised_model() {
+        let models = catalog(&session_new(), &efforts());
+        assert_eq!(models.len(), 16); // default + 15
+        assert_eq!(models[0].id, "default");
+        let sonus = models.iter().find(|m| m.id == "smodel").unwrap();
+        assert_eq!(sonus.name, "Sonus");
+        assert_eq!(sonus.reasoning_efforts.len(), 5);
+        let kimi = models.iter().find(|m| m.id == "kmodel_latest").unwrap();
+        assert_eq!(kimi.reasoning_efforts.len(), 3);
+        let auto = models.iter().find(|m| m.id == "auto").unwrap();
+        assert!(auto.reasoning_efforts.is_empty());
+        // Recorded: `efficient` advertises no reasoning_effort option either.
+        let efficient = models.iter().find(|m| m.id == "efficient").unwrap();
+        assert!(efficient.reasoning_efforts.is_empty());
+        assert!(models.iter().all(|m| m.speed_tiers.is_empty()));
+    }
+
+    #[test]
+    fn catalog_reads_each_models_own_effort_option_in_wire_order() {
+        let models = catalog(&session_new(), &efforts());
+        let effort_ids = |id: &str| {
+            models.iter().find(|m| m.id == id).unwrap()
+                .reasoning_efforts.iter().map(|effort| effort.id.as_str()).collect::<Vec<_>>()
+        };
+        assert_eq!(effort_ids("gfmodel"), ["high", "max"]);
+        assert_eq!(effort_ids("dmodel"), ["high", "max", "none"]);
+        assert_eq!(effort_ids("qmodel_latest"), ["xhigh", "high", "low", "none"]);
+        // Kimi's descriptions carry no `Reasoning` marker, yet the wire option
+        // offers three efforts: the description text must never gate them.
+        let kimi = models.iter().find(|m| m.id == "kmodel_latest").unwrap();
+        assert!(!kimi.description.contains("Reasoning"));
+        assert_eq!(effort_ids("kmodel_latest"), ["high", "low", "max"]);
+        assert_eq!(effort_ids("kmodel"), ["high", "low", "max"]);
+        assert_eq!(models.iter().filter(|m| !m.reasoning_efforts.is_empty()).count(), 13);
+        let ultimate = models.iter().find(|m| m.id == "ultimate").unwrap();
+        assert_eq!(ultimate.reasoning_efforts[0].name, "Extra high");
+        assert_eq!(ultimate.default_reasoning_effort.as_deref(), Some("xhigh"));
+        let dmodel = models.iter().find(|m| m.id == "dmodel").unwrap();
+        assert_eq!(dmodel.default_reasoning_effort.as_deref(), Some("high"));
+        assert!(models.iter().all(|m| m.context_window.is_none()));
+        // Credit prices drift between probes, so only the stable markers are pinned.
+        let sonus = models.iter().find(|m| m.id == "smodel").unwrap();
+        assert!(sonus.description.contains("Reasoning"));
+        assert!(sonus.description.contains("Vision"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an installed, signed-in Qoder CLI; reads the catalog only"]
+    async fn installed_qoder_lists_models_with_efforts() {
+        let path = executable("qoder").expect("Install Qoder CLI first");
+        let models = models(&path).await.expect("Qoder ACP discovery should succeed");
+        assert!(models.iter().any(|m| m.id == "default"));
+        assert!(models.iter().any(|m| !m.reasoning_efforts.is_empty()));
     }
 }
