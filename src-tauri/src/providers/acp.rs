@@ -240,6 +240,9 @@ impl Protocol {
             if self.config.provider == "kilo" && value["error"]["code"] == -32000 {
                 return Err(super::kilo::SIGN_IN.into());
             }
+            if self.config.provider == "qoder" && value["error"]["code"] == -32000 {
+                return Err(super::qoder::SIGN_IN.into());
+            }
             if self.config.provider == "devin" && value["error"]["code"] == -32000 {
                 return Err(super::devin::SIGN_IN.into());
             }
