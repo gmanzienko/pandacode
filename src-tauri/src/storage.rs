@@ -1374,6 +1374,7 @@ impl Store {
             "devin",
             "zcode",
             "hermes",
+            "qoder",
         ]
         .contains(&provider)
         {
