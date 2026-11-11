@@ -72,8 +72,8 @@ fn transport(pipe: &Pipe) -> String {
     }
 }
 
-/// Sends one request and reads its reply. `config_option_update` notifications
-/// arrive before the reply and are skipped; the reply is the source of truth.
+/// `config_option_update` notifications arrive before the reply and are
+/// skipped; the reply is the source of truth.
 async fn request(pipe: &mut Pipe, frame: &Value) -> Result<Value, String> {
     pipe.send(frame).await.map_err(|_| transport(pipe))?;
     loop {
@@ -568,6 +568,26 @@ mod tests {
         let sonus = models.iter().find(|m| m.id == "smodel").unwrap();
         assert!(sonus.description.contains("Reasoning"));
         assert!(sonus.description.contains("Vision"));
+    }
+
+    /// Synthetic `smodel` override: an unoffered `currentValue` must not be the default.
+    #[test]
+    fn a_current_value_outside_the_offered_efforts_is_not_the_default() {
+        let baseline = catalog(&session_new(), &efforts());
+        let sonus = baseline.iter().find(|m| m.id == "smodel").unwrap();
+        assert_eq!(sonus.default_reasoning_effort.as_deref(), Some("xhigh"));
+
+        let mut replies = efforts();
+        let options = replies.get_mut("smodel").unwrap()["configOptions"].as_array_mut().unwrap();
+        let effort = options.iter_mut().find(|option| option["id"] == "reasoning_effort").unwrap();
+        effort["currentValue"] = json!("turbo");
+        let models = catalog(&session_new(), &replies);
+        let sonus = models.iter().find(|m| m.id == "smodel").unwrap();
+        assert_eq!(sonus.default_reasoning_effort.as_deref(), None);
+        assert_eq!(
+            sonus.reasoning_efforts.iter().map(|effort| effort.id.as_str()).collect::<Vec<_>>(),
+            ["xhigh", "high", "low", "max", "medium"]
+        );
     }
 
     /// Like `ready`, but with a model and effort chosen: stops after the model
