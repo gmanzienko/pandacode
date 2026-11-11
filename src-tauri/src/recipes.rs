@@ -411,7 +411,7 @@ mod tests {
             let reports = dry_run(&r, provider, &[]).unwrap();
             assert_eq!(reports[0].status, "supported", "{provider} takes a message mid-turn");
         }
-        for provider in ["kimi", "grok", "deepseek", "commandcode", "cline", "antigravity", "github-copilot", "hermes"] {
+        for provider in ["kimi", "grok", "deepseek", "commandcode", "cline", "antigravity", "github-copilot", "hermes", "qoder"] {
             let reports = dry_run(&r, provider, &[]).unwrap();
             assert_eq!(reports[0].status, "fallback", "{provider} holds the message until the run ends");
         }
