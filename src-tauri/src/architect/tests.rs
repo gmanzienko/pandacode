@@ -1980,6 +1980,15 @@ fn auto_team_lead_chooses_worker_models() {
     assert_eq!(team.workers[0].name, "direct");
 }
 #[test]
+fn auto_team_lead_can_dispatch_qoder_workers() {
+    let (state, sid) = auto_state();
+    let result = call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[auto_assignment("qoder", json!({"provider":"qoder","model":"qmodel_latest"}))]})).unwrap();
+    assert_eq!(result["workerIds"].as_array().unwrap().len(), 1);
+    let store = state.store.lock().unwrap();
+    let team = load(&store, &sid).unwrap().unwrap();
+    assert_eq!(team.workers[0].provider, "qoder");
+}
+#[test]
 fn auto_team_rejects_ambiguous_or_unknown_models() {
     let (state, sid) = auto_state();
     let bad = |extra: Value| call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[auto_assignment("x", extra)]})).unwrap_err();
