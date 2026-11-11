@@ -73,6 +73,7 @@ pub(super) fn configure(command: &mut Command, config: &RunConfig) {
         "kilo" => super::kilo::configure(command),
         "devin" => super::devin::configure(command),
         "hermes" => super::hermes::configure(command, config),
+        "qoder" => super::qoder::configure(command),
         "antigravity" => antigravity_args(command),
         _ => {
             #[cfg(target_os = "linux")]
