@@ -117,8 +117,7 @@ mod tests {
         assert_eq!(permission("full", "execute"), Some("allow_once"));
     }
 
-    /// Recorded from `qodercli --acp` 1.1.13; session ID anonymized. The mode
-    /// catalog is the recorded one; the model catalog belongs to discovery.
+    /// Recorded from `qodercli --acp` 1.1.13; session ID anonymized, model catalog omitted.
     fn session() -> Value {
         json!({"jsonrpc":"2.0","id":2,"result":{"sessionId":"ses_qoder_test",
             "modes":{"availableModes":[
@@ -137,7 +136,7 @@ mod tests {
     /// anonymized. Option ids, kinds and ordering are verbatim: no
     /// `reject_always` is ever offered.
     fn permission_request(kind: &str) -> Value {
-        let mut request = json!({"jsonrpc":"2.0","id":1,"method":"session/request_permission","params":{
+        json!({"jsonrpc":"2.0","id":1,"method":"session/request_permission","params":{
             "sessionId":"ses_qoder_test",
             "options":[
                 {"optionId":"proceed_always","name":"Allow for this session","kind":"allow_always"},
@@ -145,11 +144,9 @@ mod tests {
                 {"optionId":"cancel","name":"Reject","kind":"reject_once"}],
             "toolCall":{"toolCallId":"call_5f44dc5181244712b01e386f","status":"pending","title":"Edit panda.txt",
                 "content":[{"type":"diff","path":"panda.txt","oldText":null,"newText":"PANDA\n","_meta":{"kind":"add"}}],
-                "kind":"edit",
+                "kind":kind,
                 "rawInput":{"content":"PANDA\n","file_path":"panda.txt"},
-                "_meta":{"qoder":{"toolName":"Write"}}}}});
-        request["params"]["toolCall"]["kind"] = json!(kind);
-        request
+                "_meta":{"qoder":{"toolName":"Write"}}}}})
     }
 
     fn ready(mode: &str) -> Protocol {
@@ -183,9 +180,33 @@ mod tests {
             let step = p.acp(permission_request(kind)).unwrap();
             assert_eq!(step.write[0]["result"]["outcome"]["optionId"], "proceed_once", "{kind}");
         }
+    }
+
+    #[test]
+    fn full_access_execute_selects_the_offered_proceed_once_option() {
         let mut p = ready("full");
         let step = p.acp(permission_request("execute")).unwrap();
         assert_eq!(step.write[0]["result"]["outcome"]["optionId"], "proceed_once");
+    }
+
+    /// Auto edits are allowed by the shared ACP path rather than Qoder's own
+    /// policy; commands still ask the user.
+    #[test]
+    fn auto_mode_allows_research_and_edits_but_keeps_command_approvals() {
+        for (kind, expected) in [
+            ("read", Some("proceed_once")),
+            ("edit", Some("proceed_once")),
+            ("execute", None),
+        ] {
+            let mut p = ready("auto");
+            let step = p.acp(permission_request(kind)).unwrap();
+            if let Some(expected) = expected {
+                assert_eq!(step.write[0]["result"]["outcome"]["optionId"], expected, "{kind}");
+            } else {
+                assert!(step.events.iter().any(|event| event.kind == "approval"), "{kind}");
+                assert!(step.write.is_empty(), "{kind}");
+            }
+        }
     }
 
     #[test]
@@ -217,6 +238,35 @@ mod tests {
         let mut unsupported = session();
         unsupported["result"]["configOptions"][0]["options"] = json!([
             {"value":"default","name":"Default","description":"Prompts for approval"}]);
+        unsupported["result"]["modes"]["availableModes"] = json!([{"id":"default","name":"Default"}]);
+        let error = p.acp(unsupported).err().unwrap();
+        assert_eq!(error, "This harness does not advertise the selected task mode.");
+    }
+
+    /// The recordings carry `availableModes` without `configOptions`, so the
+    /// mode rides on `session/set_mode`.
+    #[test]
+    fn recorded_modes_without_config_options_use_session_set_mode() {
+        let mut cfg = super::super::tests::config("qoder");
+        cfg.mode = "plan".into();
+        let mut p = Protocol::new(cfg);
+        p.acp(initialize()).unwrap();
+        let mut modes_only = session();
+        modes_only["result"].as_object_mut().unwrap().remove("configOptions");
+        let step = p.acp(modes_only).unwrap();
+        assert_eq!(step.write[0]["method"], "session/set_mode");
+        assert_eq!(step.write[0]["params"]["modeId"], "plan");
+        assert_eq!(step.write[0]["params"]["sessionId"], "ses_qoder_test");
+    }
+
+    #[test]
+    fn an_unadvertised_mode_without_config_options_fails_the_run() {
+        let mut cfg = super::super::tests::config("qoder");
+        cfg.mode = "plan".into();
+        let mut p = Protocol::new(cfg);
+        p.acp(initialize()).unwrap();
+        let mut unsupported = session();
+        unsupported["result"].as_object_mut().unwrap().remove("configOptions");
         unsupported["result"]["modes"]["availableModes"] = json!([{"id":"default","name":"Default"}]);
         let error = p.acp(unsupported).err().unwrap();
         assert_eq!(error, "This harness does not advertise the selected task mode.");
