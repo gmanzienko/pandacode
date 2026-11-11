@@ -889,7 +889,6 @@ mod tests {
         assert_eq!(snapshot(&result, "turn/agent").status, "completed");
         assert!(snapshot(&result, "turn/agent").tools.is_empty());
     }
-    /// Claude's delegation envelopes must not create child state on an ACP harness.
     #[test]
     fn acp_harnesses_ignore_claude_child_frames() {
         for provider in ["qoder", "cline", "kilo"] {
