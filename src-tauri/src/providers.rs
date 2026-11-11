@@ -4436,6 +4436,7 @@ mod tests {
         let hits: Vec<_> = PROVIDERS.iter().filter(|(id, _)| *id == "qoder").collect();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].1, "Qoder");
+        assert_eq!(executable_name("qoder"), "qodercli");
     }
 
     #[test]
