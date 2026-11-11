@@ -1265,7 +1265,7 @@ pub(crate) async fn list_model_catalog(provider: &str) -> Result<Vec<ModelInfo>,
         "devin" => devin::models(&path).await,
         "zcode" => zcode::models(&path).await,
         "hermes" => hermes::models(&path).await,
-        _ => unreachable!(),
+        _ => Err("Unknown provider".into()),
     }
 }
 
@@ -4433,6 +4433,33 @@ mod tests {
         let hits: Vec<_> = PROVIDERS.iter().filter(|(id, _)| *id == "qoder").collect();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].1, "Qoder");
+    }
+
+    #[test]
+    fn qoder_without_a_catalog_errors_instead_of_aborting() {
+        const CHILD: &str = "PANDACODE_TEST_QODER_CATALOG";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "providers::tests::qoder_without_a_catalog_errors_instead_of_aborting", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let directory = std::env::temp_dir().join(format!("pandacode-qoder-catalog-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let exe = directory.join("qodercli");
+        std::fs::write(&exe, "").unwrap();
+        std::fs::write(
+            directory.join("provider-settings.json"),
+            serde_json::json!({"executablePaths": {"qoder": exe}}).to_string(),
+        )
+        .unwrap();
+        crate::provider_settings::setup(&directory).unwrap();
+        let error = tauri::async_runtime::block_on(list_model_catalog("qoder")).unwrap_err();
+        std::fs::remove_dir_all(directory).unwrap();
+        assert_eq!(error, "Unknown provider");
     }
 
     pub(super) fn config(provider: &str) -> RunConfig {
