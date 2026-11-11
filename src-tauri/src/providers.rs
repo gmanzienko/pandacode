@@ -4457,9 +4457,9 @@ mod tests {
         )
         .unwrap();
         crate::provider_settings::setup(&directory).unwrap();
-        let error = tauri::async_runtime::block_on(list_model_catalog("qoder")).unwrap_err();
+        let result = tauri::async_runtime::block_on(list_model_catalog("qoder"));
         std::fs::remove_dir_all(directory).unwrap();
-        assert_eq!(error, "Unknown provider");
+        assert_eq!(result.unwrap_err(), "Unknown provider");
     }
 
     pub(super) fn config(provider: &str) -> RunConfig {
