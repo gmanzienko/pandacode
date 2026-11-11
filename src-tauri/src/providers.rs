@@ -4430,6 +4430,13 @@ mod tests {
     }
 
     #[test]
+    fn qoder_launches_with_acp_instead_of_the_claude_stream_json_args() {
+        let mut command = Command::new("qodercli");
+        configure_command(&mut command, &config("qoder"));
+        assert_eq!(command.as_std().get_args().collect::<Vec<_>>(), ["--acp"]);
+    }
+
+    #[test]
     fn qoder_without_a_catalog_errors_instead_of_aborting() {
         const CHILD: &str = "PANDACODE_TEST_QODER_CATALOG";
         if std::env::var_os(CHILD).is_none() {
