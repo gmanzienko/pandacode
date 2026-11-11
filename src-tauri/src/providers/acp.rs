@@ -914,7 +914,8 @@ impl Protocol {
     }
     fn acp_effort(&mut self, step: &mut Step) -> Result<(), String> {
         if let Some(effort) = &self.config.reasoning_effort {
-            let option = options(&self.acp_config, "thought_level").or_else(|| options(&self.acp_config, "effort"));
+            // Qoder files its effort under the `model` category, so only the exact id finds it.
+            let option = options(&self.acp_config, "thought_level").or_else(|| options(&self.acp_config, "effort")).or_else(|| options(&self.acp_config, "reasoning_effort"));
             match option {
                 Some(option) if self.unchanged(option, effort) => self.kimi_prompt(step),
                 Some(option) => step
