@@ -52,6 +52,7 @@ mod muse;
 mod deepseek;
 mod kimi_models;
 mod kilo;
+mod qoder;
 mod launch;
 mod pi;
 mod zcode;
@@ -3587,7 +3588,7 @@ fn configure_command_with_agents(
         "zcode" => zcode::configure(command),
         "muse" => muse::configure(command, config),
         "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" => acp::configure(command, config),
-        "github-copilot" | "devin" | "hermes" => acp::configure(command, config),
+        "github-copilot" | "devin" | "hermes" | "qoder" => acp::configure(command, config),
         "kimi" => {
             if use_model {
                 command.args(["--model", &config.model]);
@@ -3731,6 +3732,7 @@ async fn run_inner(
         "devin",
         "zcode",
         "hermes",
+        "qoder",
     ]
     .contains(&config.provider.as_str())
     {
