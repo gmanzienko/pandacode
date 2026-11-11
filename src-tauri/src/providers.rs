@@ -772,7 +772,7 @@ pub fn validate_reasoning_effort(provider: &str, effort: Option<&str>) -> Result
     let valid = match (provider, effort) {
         (
             "claude" | "codex" | "kimi" | "glm" | "opencode" | "antigravity" | "grok" | "mimo" | "alibaba"
-            | "pi" | "deepseek" | "commandcode" | "cline" | "kilo" | "omp" | "github-copilot" | "muse" | "devin" | "zcode" | "hermes",
+            | "pi" | "deepseek" | "commandcode" | "cline" | "kilo" | "omp" | "github-copilot" | "muse" | "devin" | "zcode" | "hermes" | "qoder",
             None,
         ) => true,
         ("claude" | "glm" | "mimo" | "alibaba", Some(value)) => {
@@ -780,7 +780,7 @@ pub fn validate_reasoning_effort(provider: &str, effort: Option<&str>) -> Result
         }
         // The current app-server schema deliberately permits catalog-defined effort IDs.
         // Kimi's thinking option lists on/off or the model's levels (low/high/max).
-        ("codex" | "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "devin" | "zcode" | "hermes", Some(value)) => {
+        ("codex" | "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "devin" | "zcode" | "hermes" | "qoder", Some(value)) => {
             // grok and cline pass it as an argv value: a leading dash would read as a flag.
             !value.is_empty()
                 && !value.starts_with('-')
@@ -1262,6 +1262,7 @@ pub(crate) async fn list_model_catalog(provider: &str) -> Result<Vec<ModelInfo>,
         "commandcode" => commandcode::models(&path).await,
         "cline" => cline::models(&path).await,
         "kilo" => kilo::models(&path).await,
+        "qoder" => qoder::models(&path).await,
         "github-copilot" => github_copilot::models(&path).await,
         "muse" => muse::models(&path).await,
         "devin" => devin::models(&path).await,
@@ -4444,33 +4445,6 @@ mod tests {
         let mut command = Command::new("qodercli");
         configure_command(&mut command, &config("qoder"));
         assert_eq!(command.as_std().get_args().collect::<Vec<_>>(), ["--acp"]);
-    }
-
-    #[test]
-    fn qoder_without_a_catalog_errors_instead_of_aborting() {
-        const CHILD: &str = "PANDACODE_TEST_QODER_CATALOG";
-        if std::env::var_os(CHILD).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "providers::tests::qoder_without_a_catalog_errors_instead_of_aborting", "--nocapture"])
-                .env(CHILD, "1")
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-            return;
-        }
-        let directory = std::env::temp_dir().join(format!("pandacode-qoder-catalog-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&directory).unwrap();
-        let exe = directory.join("qodercli");
-        std::fs::write(&exe, "").unwrap();
-        std::fs::write(
-            directory.join("provider-settings.json"),
-            serde_json::json!({"executablePaths": {"qoder": exe}}).to_string(),
-        )
-        .unwrap();
-        crate::provider_settings::setup(&directory).unwrap();
-        let result = tauri::async_runtime::block_on(list_model_catalog("qoder"));
-        std::fs::remove_dir_all(directory).unwrap();
-        assert_eq!(result.unwrap_err(), "Unknown provider");
     }
 
     pub(super) fn config(provider: &str) -> RunConfig {
