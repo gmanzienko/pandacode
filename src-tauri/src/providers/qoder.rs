@@ -243,10 +243,11 @@ mod tests {
         assert_eq!(error, "This harness does not advertise the selected task mode.");
     }
 
-    /// The recordings carry `availableModes` without `configOptions`, so the
-    /// mode rides on `session/set_mode`.
+    /// Synthetic shape: every recording advertises a `mode` configOption, but a
+    /// future Qoder build could expose only `availableModes`. Cover the
+    /// `session/set_mode` fallback so the selected mode is still applied.
     #[test]
-    fn recorded_modes_without_config_options_use_session_set_mode() {
+    fn modes_without_config_options_use_session_set_mode() {
         let mut cfg = super::super::tests::config("qoder");
         cfg.mode = "plan".into();
         let mut p = Protocol::new(cfg);
