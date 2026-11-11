@@ -147,7 +147,7 @@ impl Protocol {
     }
 
     pub(super) fn steer(&mut self, id: String, text: String, reply: RpcReply) -> Step {
-        if matches!(self.config.provider.as_str(), "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes") {
+        if matches!(self.config.provider.as_str(), "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "qoder" | "github-copilot" | "devin" | "hermes") {
             return self.acp_steer(id, text, reply);
         }
         let mut step = Step::default();
@@ -863,7 +863,7 @@ mod tests {
 
     #[test]
     fn acp_harnesses_steer_and_empty_messages_are_refused() {
-        for provider in ["kimi", "opencode", "kilo", "grok", "antigravity", "deepseek", "commandcode", "hermes"] {
+        for provider in ["kimi", "opencode", "kilo", "grok", "antigravity", "deepseek", "commandcode", "hermes", "qoder"] {
             let mut p = Protocol::new(config(provider));
             let (_, mut reply) = steer(&mut p, "hello");
             assert!(reply.try_recv().unwrap().is_ok(), "{provider} holds the steer");
@@ -872,6 +872,15 @@ mod tests {
         p.phase = 1;
         let (_, mut reply) = steer(&mut p, "   ");
         assert!(reply.try_recv().unwrap().is_err());
+    }
+
+    #[test]
+    fn qoder_holds_a_mid_turn_message_for_the_next_turn() {
+        let mut p = Protocol::new(config("qoder"));
+        let (step, mut reply) = steer(&mut p, "also add tests");
+        assert!(step.write.is_empty(), "a held steer must not interrupt the running turn");
+        assert_eq!(reply.try_recv().unwrap().unwrap()["mode"], "next-turn");
+        assert_eq!(steer_events(&step), [pair("pending", "next-turn")]);
     }
 
     /// The composer's message stays queued; an agent's went nowhere, and it must be told.
