@@ -52,7 +52,7 @@ mod muse;
 mod deepseek;
 mod kimi_models;
 mod kilo;
-mod qoder;
+pub(crate) mod qoder;
 mod launch;
 mod pi;
 mod zcode;

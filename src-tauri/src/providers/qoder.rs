@@ -13,7 +13,7 @@ const SDK_ENVIRONMENT: [&str; 4] = [
     "QODER_AUTH_STDIN",
 ];
 
-pub(super) fn configure(command: &mut Command) {
+pub(crate) fn configure(command: &mut Command) {
     command.arg("--acp");
     for name in SDK_ENVIRONMENT {
         command.env_remove(name);
