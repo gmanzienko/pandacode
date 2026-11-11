@@ -1866,6 +1866,21 @@ mod tests {
     }
 
     #[test]
+    fn launcher_selection_accepts_qoder_and_rejects_unknown_harnesses() {
+        let qoder = ModelSelection {
+            provider: "qoder".into(),
+            model: "default".into(),
+            reasoning_effort: None,
+        };
+        validate_selection(&qoder).unwrap();
+        let unknown = ModelSelection {
+            provider: "unknown".into(),
+            ..qoder
+        };
+        assert!(validate_selection(&unknown).is_err());
+    }
+
+    #[test]
     fn invalid_launch_effort_rolls_back_new_task() {
         let (store, project) = fixture();
         let before = store.sessions().unwrap().len();
