@@ -3,7 +3,7 @@
 //! efforts. Credentials stay with the installed Qoder CLI.
 use super::*;
 
-/// Qoder Desktop and the Agent SDK export these into every shell they spawn.
+/// Qoder Desktop and the Agent SDK export SDK variables into the shells they spawn.
 /// Inheriting them would hand the CLI the host's SDK identity and auth payload
 /// instead of its own sign-in.
 const SDK_ENVIRONMENT: [&str; 4] = [
@@ -33,15 +33,20 @@ mod tests {
 
     #[test]
     fn configure_removes_the_inherited_sdk_environment() {
+        let inherited = [
+            ("QODER_AGENT_SDK_ENTRYPOINT", "sdk"),
+            ("QODER_SDK_ACCESS_TOKEN", "secret"),
+            ("QODER_SDK_AUTH_PAYLOAD_FILE", "/tmp/payload.json"),
+            ("QODER_AUTH_STDIN", "1"),
+        ];
         let mut cmd = Command::new("test");
-        cmd.env("QODER_AGENT_SDK_ENTRYPOINT", "sdk");
-        cmd.env("QODER_SDK_ACCESS_TOKEN", "secret");
-        cmd.env("QODER_SDK_AUTH_PAYLOAD_FILE", "/tmp/payload.json");
-        cmd.env("QODER_AUTH_STDIN", "1");
+        for (name, value) in inherited {
+            cmd.env(name, value);
+        }
         cmd.env("QODER_CONFIG_DIR", "/home/user/.qoder");
         configure(&mut cmd);
         let envs: Vec<_> = cmd.as_std().get_envs().collect();
-        for name in ["QODER_AGENT_SDK_ENTRYPOINT", "QODER_SDK_ACCESS_TOKEN", "QODER_SDK_AUTH_PAYLOAD_FILE", "QODER_AUTH_STDIN"] {
+        for (name, _) in inherited {
             assert!(envs.iter().any(|(key, value)| *key == name && value.is_none()), "{name}");
         }
         // A user's own config folder is not an SDK variable and must survive.
