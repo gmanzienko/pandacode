@@ -137,6 +137,7 @@ pub(crate) const HARNESSES: [&str; 19] = [
     "muse",
     "devin",
     "hermes",
+    "qoder",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

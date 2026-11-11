@@ -119,6 +119,7 @@ pub(crate) const PROVIDERS: [(&str, &str); 20] = [
     ("devin", "Devin CLI"),
     ("zcode", "ZCode"),
     ("hermes", "Hermes Agent"),
+    ("qoder", "Qoder"),
 ];
 
 /// Claude Code tools that only report back to a session that stays open after its turn.
@@ -4425,6 +4426,13 @@ mod tests {
         assert!(validate_reasoning_effort("hermes", None).is_ok());
         assert!(validate_reasoning_effort("hermes", Some("high")).is_ok());
         assert!(validate_reasoning_effort("hermes", Some("bad\nflag")).is_err());
+    }
+
+    #[test]
+    fn qoder_is_registered_once() {
+        let hits: Vec<_> = PROVIDERS.iter().filter(|(id, _)| *id == "qoder").collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].1, "Qoder");
     }
 
     pub(super) fn config(provider: &str) -> RunConfig {
