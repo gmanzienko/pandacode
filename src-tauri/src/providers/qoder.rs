@@ -570,6 +570,48 @@ mod tests {
         assert!(sonus.description.contains("Vision"));
     }
 
+    /// Like `ready`, but with a model and effort chosen: stops after the model
+    /// switch (request id 5) so the caller feeds that model's recorded reply
+    /// from `efforts()`.
+    fn ready_model_effort(mode: &str, model: &str, effort: &str) -> Protocol {
+        let mut cfg = super::super::tests::config("qoder");
+        cfg.mode = mode.into();
+        cfg.model = model.into();
+        cfg.reasoning_effort = Some(effort.into());
+        let mut p = Protocol::new(cfg);
+        assert_eq!(p.acp(initialize()).unwrap().write[0]["method"], "session/new");
+        let step = p.acp(json!({"jsonrpc":"2.0","id":2,"result":session_new()})).unwrap();
+        assert_eq!(step.write[0]["method"], "session/set_config_option");
+        assert_eq!(step.write[0]["params"]["configId"], "mode");
+        assert_eq!(step.write[0]["params"]["value"], mode_id(mode));
+        let step = p.acp(json!({"jsonrpc":"2.0","id":4,"result":{}})).unwrap();
+        assert_eq!(step.write[0]["id"], 5);
+        assert_eq!(step.write[0]["method"], "session/set_config_option");
+        assert_eq!(step.write[0]["params"]["configId"], "model");
+        assert_eq!(step.write[0]["params"]["value"], model);
+        p
+    }
+
+    #[test]
+    fn a_chosen_effort_is_set_after_the_model_switch_before_the_prompt() {
+        let mut p = ready_model_effort("ask", "smodel", "max");
+        let step = p.acp(json!({"jsonrpc":"2.0","id":5,"result":efforts()["smodel"]})).unwrap();
+        assert_eq!(step.write[0]["id"], 6);
+        assert_eq!(step.write[0]["method"], "session/set_config_option");
+        assert_eq!(step.write[0]["params"]["sessionId"], "ses_qoder_test");
+        assert_eq!(step.write[0]["params"]["configId"], "reasoning_effort");
+        assert_eq!(step.write[0]["params"]["value"], "max");
+        let prompt = p.acp(json!({"jsonrpc":"2.0","id":6,"result":{}})).unwrap();
+        assert_eq!(prompt.write[0]["method"], "session/prompt");
+    }
+
+    #[test]
+    fn an_effort_on_a_model_that_advertises_none_fails_the_run() {
+        let mut p = ready_model_effort("ask", "efficient", "max");
+        let error = p.acp(json!({"jsonrpc":"2.0","id":5,"result":efforts()["efficient"]})).err().unwrap();
+        assert_eq!(error, "This model does not advertise an adjustable reasoning effort. Choose harness settings.");
+    }
+
     #[tokio::test]
     #[ignore = "requires an installed, signed-in Qoder CLI; reads the catalog only"]
     async fn installed_qoder_lists_models_with_efforts() {
