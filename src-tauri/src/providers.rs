@@ -858,6 +858,7 @@ fn executable_name(name: &str) -> &str {
         "commandcode" => "command-code",
         "github-copilot" => "copilot",
         "hermes" => "hermes",
+        "qoder" => "qodercli",
         other => other,
     }
 }

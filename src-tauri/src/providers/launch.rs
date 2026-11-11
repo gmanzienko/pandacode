@@ -125,6 +125,7 @@ fn resolve(path: &Path, windows: bool) -> Result<Launch, String> {
             "copilot" => "@github/copilot",
             "cline" => "cline",
             "kilo" | "kilocode" => "@kilocode/cli",
+            "qodercli" => "@qoder-ai/qodercli",
             "netlify" => "netlify-cli",
             "npx" => "npm",
             _ => return Err(
@@ -1133,6 +1134,7 @@ mod tests {
             ("cline", "cline"),
             ("kilo", "@kilocode/cli"),
             ("kilocode", "@kilocode/cli"),
+            ("qodercli", "@qoder-ai/qodercli"),
         ] {
             let shim = f.file(&format!("node_modules/.bin/{name}.cmd"), "@echo off");
             f.file(
