@@ -268,7 +268,8 @@ fn prompt_harnesses_record_activation_without_files() {
     fx.import(Kind::Skill, &fx.folder("release", &[("SKILL.md", SKILL)]));
     for harness in ["kimi", "qoder"] {
         let change = fx.library.activate("release-notes", harness, Scope::User, None, false).unwrap();
-        assert_eq!(change.items[0].meta.activations[0].surface, "prompt", "{harness}");
+        let activation = change.items[0].meta.activations.iter().find(|a| a.harness == harness).unwrap();
+        assert_eq!(activation.surface, "prompt", "{harness}");
         let matrix = fx.library.matrix(None).unwrap();
         let row = matrix.harnesses.iter().find(|h| h.harness == harness).unwrap();
         assert!(row.prompt && row.cells[0].status == "prompt", "{harness}");
