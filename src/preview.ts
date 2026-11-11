@@ -372,6 +372,7 @@ const catalogs: Record<ProviderId, ProviderModel[]> = {
   zcode: [
     { id: 'zcproxy/GLM-5.3', name: 'zcproxy/GLM-5.3', description: 'OmniRouter', reasoningEfforts: ['low', 'high', 'max'].map(effort => ({ id: effort, name: effort[0].toUpperCase() + effort.slice(1), description: '' })), defaultReasoningEffort: 'max', contextWindow: 200000 },
   ],
+  qoder: [],
 };
 // `?bench=diff` (or localStorage `pandacode.bench` = `diff`) adds synthetic, deterministic
 // patches of known size for tests/diff-perf.spec.ts; other runs never see them.
