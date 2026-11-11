@@ -877,6 +877,8 @@ mod tests {
     #[test]
     fn qoder_holds_a_mid_turn_message_for_the_next_turn() {
         let mut p = Protocol::new(config("qoder"));
+        p.phase = 1;
+        p.remote_id = "session".into();
         let (step, mut reply) = steer(&mut p, "also add tests");
         assert!(step.write.is_empty(), "a held steer must not interrupt the running turn");
         assert_eq!(reply.try_recv().unwrap().unwrap()["mode"], "next-turn");
