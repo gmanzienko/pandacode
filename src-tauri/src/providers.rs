@@ -3929,7 +3929,7 @@ fn split_jev_host(host: Option<ToolHost>) -> (Option<ToolHost>, Option<ToolHost>
     ((!host.tools.is_empty()).then_some(host), Some(jev))
 }
 
-const MCP_HOST_TOOLS: [&str; 19] = ["claude", "glm", "mimo", "alibaba", "kimi", "opencode", "antigravity", "grok", "pi", "deepseek", "commandcode", "cline", "kilo", "omp", "github-copilot", "muse", "devin", "hermes", "qoder"];
+const MCP_HOST_HARNESSES: [&str; 19] = ["claude", "glm", "mimo", "alibaba", "kimi", "opencode", "antigravity", "grok", "pi", "deepseek", "commandcode", "cline", "kilo", "omp", "github-copilot", "muse", "devin", "hermes", "qoder"];
 
 async fn run_process_with_tools(
     config: RunConfig,
@@ -3987,7 +3987,7 @@ async fn run_process_with_tools(
             };
             (host.map(host_tools::HostTools::new).transpose()?, server)
         }
-        (provider, Some(host)) if MCP_HOST_TOOLS.contains(&provider) => (
+        (provider, Some(host)) if MCP_HOST_HARNESSES.contains(&provider) => (
             None,
             mcp_host::Server::start_for_run(
                 host,
@@ -4447,9 +4447,9 @@ mod tests {
 
     #[test]
     fn qoder_gets_host_tools_over_http_mcp_without_widening_the_allowlist() {
-        assert!(MCP_HOST_TOOLS.contains(&"qoder"));
-        assert!(!MCP_HOST_TOOLS.contains(&"codex"));
-        assert!(!MCP_HOST_TOOLS.contains(&"zcode"));
+        assert!(MCP_HOST_HARNESSES.contains(&"qoder"));
+        assert!(!MCP_HOST_HARNESSES.contains(&"codex"));
+        assert!(!MCP_HOST_HARNESSES.contains(&"zcode"));
     }
 
     pub(super) fn config(provider: &str) -> RunConfig {

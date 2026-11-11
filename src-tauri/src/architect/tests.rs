@@ -1987,6 +1987,9 @@ fn auto_team_lead_can_dispatch_qoder_workers() {
     let store = state.store.lock().unwrap();
     let team = load(&store, &sid).unwrap().unwrap();
     assert_eq!(team.workers[0].provider, "qoder");
+    assert_eq!(team.workers[0].model, "qmodel_latest");
+    let direct = store.session(&team.workers[0].session_id).unwrap();
+    assert_eq!((direct.provider.as_str(), direct.model.as_str()), ("qoder", "qmodel_latest"));
 }
 #[test]
 fn auto_team_rejects_ambiguous_or_unknown_models() {
