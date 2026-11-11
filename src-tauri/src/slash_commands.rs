@@ -1214,6 +1214,19 @@ mod tests {
     }
 
     #[test]
+    fn runtime_command_frames_reach_the_qoder_parser_without_launching_it() {
+        let cwd = Path::new("runtime-project");
+        let frame = json!({"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"review","description":"Review changes","input":{"hint":"[focus]"}}]}}});
+        assert!(observe_runtime("qoder", cwd, &frame));
+        assert!(!observe_runtime("unknown", cwd, &frame));
+        assert!(!observe_runtime(
+            "qoder",
+            cwd,
+            &json!({"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk"}}})
+        ));
+    }
+
+    #[test]
     fn startup_timeouts_preserve_cached_commands_without_echoing_process_output() {
         let mut cache = CommandCache::default();
         let timeout = crate::providers::acp::ACP_STARTUP_TIMEOUT;
