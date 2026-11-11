@@ -24,6 +24,24 @@ pub(crate) fn configure(command: &mut Command) {
     }
 }
 
+pub(super) fn mode_id(mode: &str) -> &'static str {
+    match mode {
+        "auto" => "acceptEdits",
+        "full" => "bypassPermissions",
+        "plan" => "plan",
+        _ => "default",
+    }
+}
+
+pub(super) fn permission(mode: &str, kind: &str) -> Option<&'static str> {
+    match kind {
+        "read" | "search" | "fetch" | "think" => Some("allow_once"),
+        _ if mode == "plan" => Some("reject_once"),
+        _ if mode == "full" => Some("allow_once"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,5 +95,142 @@ mod tests {
         assert_eq!(step.write[0]["method"], "session/new");
         let error = p.acp(json!({"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"Authentication required"}})).err().unwrap();
         assert_eq!(error, SIGN_IN);
+    }
+
+    #[test]
+    fn every_pandacode_mode_has_exactly_one_qoder_mode() {
+        assert_eq!(mode_id("ask"), "default");
+        assert_eq!(mode_id("auto"), "acceptEdits");
+        assert_eq!(mode_id("plan"), "plan");
+        assert_eq!(mode_id("full"), "bypassPermissions");
+    }
+
+    #[test]
+    fn plan_allows_research_and_declines_everything_else() {
+        for kind in ["read", "search", "fetch", "think"] {
+            assert_eq!(permission("plan", kind), Some("allow_once"));
+        }
+        for kind in ["edit", "delete", "move", "execute", "other"] {
+            assert_eq!(permission("plan", kind), Some("reject_once"));
+        }
+        assert_eq!(permission("ask", "edit"), None);
+        assert_eq!(permission("full", "execute"), Some("allow_once"));
+    }
+
+    /// Recorded from `qodercli --acp` 1.1.13; session ID anonymized. The mode
+    /// catalog is the recorded one; the model catalog belongs to discovery.
+    fn session() -> Value {
+        json!({"jsonrpc":"2.0","id":2,"result":{"sessionId":"ses_qoder_test",
+            "modes":{"availableModes":[
+                {"id":"default","name":"Default","description":"Prompts for approval"},
+                {"id":"acceptEdits","name":"Accept Edits","description":"Auto-approves edit tools"},
+                {"id":"bypassPermissions","name":"Bypass Permissions","description":"Auto-approves all tools"},
+                {"id":"plan","name":"Plan","description":"Read-only mode"}],"currentModeId":"default"},
+            "configOptions":[{"type":"select","id":"mode","name":"Mode","category":"mode","currentValue":"default","options":[
+                {"value":"default","name":"Default","description":"Prompts for approval"},
+                {"value":"acceptEdits","name":"Accept Edits","description":"Auto-approves edit tools"},
+                {"value":"bypassPermissions","name":"Bypass Permissions","description":"Auto-approves all tools"},
+                {"value":"plan","name":"Plan","description":"Read-only mode"}]}]}})
+    }
+
+    /// Recorded Plan-mode Write request; session ID and recorder paths
+    /// anonymized. Option ids, kinds and ordering are verbatim: no
+    /// `reject_always` is ever offered.
+    fn permission_request(kind: &str) -> Value {
+        let mut request = json!({"jsonrpc":"2.0","id":1,"method":"session/request_permission","params":{
+            "sessionId":"ses_qoder_test",
+            "options":[
+                {"optionId":"proceed_always","name":"Allow for this session","kind":"allow_always"},
+                {"optionId":"proceed_once","name":"Allow","kind":"allow_once"},
+                {"optionId":"cancel","name":"Reject","kind":"reject_once"}],
+            "toolCall":{"toolCallId":"call_5f44dc5181244712b01e386f","status":"pending","title":"Edit panda.txt",
+                "content":[{"type":"diff","path":"panda.txt","oldText":null,"newText":"PANDA\n","_meta":{"kind":"add"}}],
+                "kind":"edit",
+                "rawInput":{"content":"PANDA\n","file_path":"panda.txt"},
+                "_meta":{"qoder":{"toolName":"Write"}}}}});
+        request["params"]["toolCall"]["kind"] = json!(kind);
+        request
+    }
+
+    fn ready(mode: &str) -> Protocol {
+        let mut cfg = super::super::tests::config("qoder");
+        cfg.mode = mode.into();
+        let mut p = Protocol::new(cfg);
+        assert_eq!(p.acp(initialize()).unwrap().write[0]["method"], "session/new");
+        let step = p.acp(session()).unwrap();
+        assert_eq!(step.write[0]["method"], "session/set_config_option");
+        assert_eq!(step.write[0]["params"]["configId"], "mode");
+        assert_eq!(step.write[0]["params"]["value"], mode_id(mode));
+        let prompt = p.acp(json!({"jsonrpc":"2.0","id":4,"result":{}})).unwrap();
+        assert_eq!(prompt.write[0]["method"], "session/prompt");
+        p
+    }
+
+    #[test]
+    fn recorded_plan_edit_selects_the_offered_cancel_option() {
+        let mut p = ready("plan");
+        let step = p.acp(permission_request("edit")).unwrap();
+        assert_eq!(step.write[0]["id"], 1);
+        assert_eq!(step.write[0]["result"]["outcome"], json!({"outcome":"selected","optionId":"cancel"}));
+        assert!(step.events.iter().any(|event| event.kind == "status" && event.text == "Plan mode declined: Edit panda.txt"));
+        assert!(!step.events.iter().any(|event| event.kind == "approval"));
+    }
+
+    #[test]
+    fn recorded_research_kinds_select_the_offered_proceed_once_option() {
+        for kind in ["read", "search", "fetch", "think"] {
+            let mut p = ready("plan");
+            let step = p.acp(permission_request(kind)).unwrap();
+            assert_eq!(step.write[0]["result"]["outcome"]["optionId"], "proceed_once", "{kind}");
+        }
+        let mut p = ready("full");
+        let step = p.acp(permission_request("execute")).unwrap();
+        assert_eq!(step.write[0]["result"]["outcome"]["optionId"], "proceed_once");
+    }
+
+    #[test]
+    fn standard_mode_keeps_the_edit_approval_for_the_user() {
+        let mut p = ready("ask");
+        let step = p.acp(permission_request("edit")).unwrap();
+        assert!(step.events.iter().any(|event| event.kind == "approval"));
+        assert!(step.write.is_empty());
+    }
+
+    #[test]
+    fn a_plan_edit_without_a_reject_option_cancels_the_turn() {
+        let mut p = ready("plan");
+        let mut request = permission_request("edit");
+        request["params"]["options"] = json!([
+            {"optionId":"proceed_always","name":"Allow for this session","kind":"allow_always"},
+            {"optionId":"proceed_once","name":"Allow","kind":"allow_once"}]);
+        let step = p.acp(request).unwrap();
+        assert_eq!(step.write[0]["result"]["outcome"]["outcome"], "cancelled");
+        assert!(!step.events.iter().any(|event| event.kind == "approval"));
+    }
+
+    #[test]
+    fn a_mode_the_cli_does_not_advertise_fails_the_run() {
+        let mut cfg = super::super::tests::config("qoder");
+        cfg.mode = "plan".into();
+        let mut p = Protocol::new(cfg);
+        p.acp(initialize()).unwrap();
+        let mut unsupported = session();
+        unsupported["result"]["configOptions"][0]["options"] = json!([
+            {"value":"default","name":"Default","description":"Prompts for approval"}]);
+        unsupported["result"]["modes"]["availableModes"] = json!([{"id":"default","name":"Default"}]);
+        let error = p.acp(unsupported).err().unwrap();
+        assert_eq!(error, "This harness does not advertise the selected task mode.");
+    }
+
+    #[test]
+    fn a_session_without_mode_information_fails_the_run() {
+        for mode in ["ask", "auto", "plan", "full"] {
+            let mut cfg = super::super::tests::config("qoder");
+            cfg.mode = mode.into();
+            let mut p = Protocol::new(cfg);
+            p.acp(initialize()).unwrap();
+            let error = p.acp(json!({"jsonrpc":"2.0","id":2,"result":{"sessionId":"ses_qoder_test"}})).err().unwrap();
+            assert_eq!(error, "This harness does not advertise the selected task mode.", "{mode}");
+        }
     }
 }
