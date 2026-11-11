@@ -236,6 +236,7 @@ const providers: Provider[] = [
   { id: 'devin', name: 'Devin CLI', installed: true, path: '/sample/bin/devin', version: 'devin 3000.11.216 (sample)', models: [] },
   { id: 'zcode', name: 'ZCode', installed: true, path: '/sample/bin/zcode', version: '3.16.3', models: [] },
   { id: 'hermes', name: 'Hermes Agent', installed: true, path: '/sample/bin/hermes', version: 'hermes 0.5.0 (sample)', models: [] },
+  { id: 'qoder', name: 'Qoder', installed: true, path: '/sample/bin/qodercli', version: '1.1.13 (sample)', models: [] },
 ];
 // Mirrors providers::mimo::ENDPOINTS; the native side is the authority.
 const previewMimoEndpoints = [
