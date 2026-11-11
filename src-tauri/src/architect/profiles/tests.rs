@@ -159,6 +159,7 @@ fn new_user_tasks_default_to_full_without_overriding_requested_modes_or_saved_ta
             "github-copilot",
             "devin",
             "hermes",
+            "qoder",
         ] {
             let existing = store
                 .create_session(&source.project_id, provider, "default", "plan")
@@ -588,7 +589,7 @@ fn saving_ordinary_mode_preserves_existing_context_for_every_provider() {
 
 #[test]
 fn mcp_providers_keep_native_history_when_enabling_or_disabling_teams() {
-    for provider in ["claude", "kimi"] {
+    for provider in ["claude", "kimi", "qoder"] {
         let store = Store::open(std::path::Path::new(":memory:")).unwrap();
         let project = store.add_project(&std::env::temp_dir()).unwrap();
         let task = store

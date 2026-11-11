@@ -377,6 +377,7 @@ fn cache() -> &'static HashMap<&'static str, CacheSlot> {
             "devin",
             "zcode",
             "hermes",
+            "qoder",
         ]
         .into_iter()
         .map(|id| (id, CacheSlot::default()))

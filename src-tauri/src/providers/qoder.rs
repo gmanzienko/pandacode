@@ -244,9 +244,9 @@ mod tests {
     #[test]
     fn a_session_without_sign_in_names_the_login_command() {
         let mut p = Protocol::new(super::super::tests::config("qoder"));
-        let step = p.acp(initialize()).unwrap();
+        let step = p.receive(initialize()).unwrap();
         assert_eq!(step.write[0]["method"], "session/new");
-        let error = p.acp(json!({"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"Authentication required"}})).err().unwrap();
+        let error = p.receive(json!({"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"Authentication required"}})).err().unwrap();
         assert_eq!(error, SIGN_IN);
     }
 
@@ -368,6 +368,20 @@ mod tests {
         let step = p.acp(permission_request("edit")).unwrap();
         assert!(step.events.iter().any(|event| event.kind == "approval"));
         assert!(step.write.is_empty());
+    }
+
+    #[test]
+    fn the_shared_acp_dispatch_drives_qoders_handshake_approvals_and_stop() {
+        let mut p = ready("ask");
+        assert_eq!(p.initial()["method"], "initialize");
+        assert_eq!(p.initial()["params"]["protocolVersion"], 1);
+        for (approved, option) in [(true, "proceed_once"), (false, "cancel")] {
+            let step = p.receive(permission_request("execute")).unwrap();
+            let id = step.events.iter().find(|event| event.kind == "approval").unwrap().request_id.clone().unwrap();
+            assert_eq!(p.approve(&id, approved).unwrap()["result"]["outcome"]["optionId"], option, "{approved}");
+        }
+        assert_eq!(p.cancel()["method"], "session/cancel");
+        assert_eq!(p.cancel()["params"]["sessionId"], "ses_qoder_test");
     }
 
     #[test]

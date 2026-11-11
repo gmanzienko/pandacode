@@ -56,6 +56,18 @@ fn rejects_invalid_bot_settings() {
 }
 
 #[test]
+fn a_bot_can_run_on_qoder_with_qoder_backups() {
+    let f = fixture();
+    let bot = create(&f.store, &BotInput {
+        provider: "qoder".into(),
+        backup_models: vec![BackupModel { provider: "qoder".into(), model: "qoder-model".into() }],
+        ..input("Scout")
+    }, &f.root).unwrap();
+    assert_eq!(bot.provider, "qoder");
+    assert_eq!(bot.backup_models[0].provider, "qoder");
+}
+
+#[test]
 fn memories_dedupe_and_bump_the_brief_version() {
     let f = fixture();
     let bot = bot(&f);

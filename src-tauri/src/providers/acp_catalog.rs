@@ -209,7 +209,7 @@ mod tests {
             {"id":"reasoning_effort","category":"thought_level","type":"select","currentValue":"high","options":[
                 {"value":"off"},{"value":"low"},{"value":"high"},{"value":"max"}]}]});
         // Both model discovery and command discovery populate this cache.
-        for provider in ["deepseek", "kilo"] {
+        for provider in ["deepseek", "kilo", "qoder"] {
             store(begin(provider, &path), &metadata);
             let models = get(provider, &path).unwrap();
             assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["default", api, account, pro]);

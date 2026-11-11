@@ -329,9 +329,10 @@ mod tests {
     fn unrated_models_fail_over_by_exact_model_id() {
         let health = Registry::default();
         let failed = model("commandcode", "acme/custom-9");
-        let pool = vec![model("opencode", "acme/custom-9"), model("opencode", "acme/custom-8"), model("kilo", "default")];
+        let pool = vec![model("opencode", "acme/custom-9"), model("opencode", "acme/custom-8"), model("kilo", "default"), model("qoder", "default")];
         assert_eq!(health.alternatives(&failed, &pool, 0), vec![model("opencode", "acme/custom-9")]);
         assert!(health.alternatives(&model("kilo", "default"), &[model("cline", "default")], 0).is_empty());
+        assert!(health.alternatives(&model("qoder", "default"), &[model("cline", "default")], 0).is_empty());
     }
 
     #[test]

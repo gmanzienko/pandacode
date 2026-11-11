@@ -680,3 +680,13 @@ async fn claude_code_rewriting_its_files_for_the_same_owner_keeps_the_reading() 
     }).await;
     assert!(anonymous.windows.is_empty());
 }
+
+    #[tokio::test]
+    async fn qoder_usage_is_answered_locally_as_unsupported() {
+        invalidate("qoder");
+        let usage = query_usage("qoder".into(), true).await.unwrap();
+        assert_eq!(usage.provider, "qoder");
+        assert_eq!(usage.status, "unsupported");
+        assert!(usage.windows.is_empty());
+        assert!(query_usage("nope".into(), true).await.is_err());
+    }

@@ -45,6 +45,7 @@ impl ModelSelection {
             "muse",
             "devin",
             "hermes",
+            "qoder",
         ]
         .contains(&self.provider.as_str())
             || self.model.len() > 200
