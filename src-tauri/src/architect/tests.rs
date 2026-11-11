@@ -4451,7 +4451,7 @@ fn a_live_blocker_keeps_its_place_when_long_summaries_use_the_budget() {
 }
 #[test]
 fn failing_over_clears_the_empty_reply_nudge() {
-    let (state, sid, _run) = failover_state("gpt-5", &["codex", "cline"]);
+    let (state, sid, _run) = failover_state("gpt-5", &["codex", "cline", "qoder"]);
     let store = state.store.lock().unwrap();
     let mut team = load(&store, &sid).unwrap().unwrap();
     team.workers[0].status = "failed".into();
@@ -4517,7 +4517,7 @@ fn a_folder_that_vanishes_fails_the_team_only_once_nothing_runs() {
 }
 #[test]
 fn failing_over_a_worker_with_sub_workers_tells_it_to_read_them_first() {
-    let (state, sid, _run) = failover_state("gpt-5", &["codex", "cline"]);
+    let (state, sid, _run) = failover_state("gpt-5", &["codex", "cline", "qoder"]);
     let store = state.store.lock().unwrap();
     let mut team = load(&store, &sid).unwrap().unwrap();
     team.workers[0].status = "failed".into();

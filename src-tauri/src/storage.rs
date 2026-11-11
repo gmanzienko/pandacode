@@ -1562,6 +1562,7 @@ impl Store {
             "devin",
             "zcode",
             "hermes",
+            "qoder",
         ]
         .contains(&provider)
         {
@@ -2204,6 +2205,7 @@ fn handoff_from_provider(content: &str) -> Option<String> {
                 | "devin"
                 | "zcode"
                 | "hermes"
+                | "qoder"
         )
     };
     (known(from) && known(to)).then(|| from.to_owned())
@@ -4262,6 +4264,7 @@ mod tests {
                 "devin",
                 "zcode",
                 "hermes",
+                "qoder",
             ] {
                 for mode in ["ask", "auto", "plan", "full"] {
                     let session = store
@@ -4297,6 +4300,14 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_handoff_notice_names_qoder_on_either_side_of_the_switch() {
+        for (from, to) in [("qoder", "claude"), ("claude", "qoder"), ("qoder", "kilo")] {
+            let content = serde_json::json!({"fromProvider":from,"toProvider":to,"summary":"Carry on."}).to_string();
+            assert_eq!(handoff_from_provider(&content).as_deref(), Some(from), "{from} -> {to}");
+        }
     }
 
     #[test]

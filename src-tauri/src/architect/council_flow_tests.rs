@@ -85,7 +85,7 @@ fn rounds_are_timed_from_each_seats_first_run() {
 
 #[test]
 fn failing_over_clears_a_reviewers_nudge_summary_and_score() {
-    let (state, sid, _run) = failover_state("gpt-5", &["codex", "cline"]);
+    let (state, sid, _run) = failover_state("gpt-5", &["codex", "cline", "qoder"]);
     let store = state.store.lock().unwrap();
     let mut team = load(&store, &sid).unwrap().unwrap();
     team.workers[0].status = "failed".into();

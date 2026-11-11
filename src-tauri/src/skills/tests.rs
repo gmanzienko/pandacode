@@ -266,11 +266,13 @@ fn findings_need_acknowledgement_and_updates_wait_for_activation() {
 fn prompt_harnesses_record_activation_without_files() {
     let fx = Fixture::new();
     fx.import(Kind::Skill, &fx.folder("release", &[("SKILL.md", SKILL)]));
-    let change = fx.library.activate("release-notes", "kimi", Scope::User, None, false).unwrap();
-    assert_eq!(change.items[0].meta.activations[0].surface, "prompt");
-    let matrix = fx.library.matrix(None).unwrap();
-    let row = matrix.harnesses.iter().find(|h| h.harness == "kimi").unwrap();
-    assert!(row.prompt && row.cells[0].status == "prompt");
+    for harness in ["kimi", "qoder"] {
+        let change = fx.library.activate("release-notes", harness, Scope::User, None, false).unwrap();
+        assert_eq!(change.items[0].meta.activations[0].surface, "prompt", "{harness}");
+        let matrix = fx.library.matrix(None).unwrap();
+        let row = matrix.harnesses.iter().find(|h| h.harness == harness).unwrap();
+        assert!(row.prompt && row.cells[0].status == "prompt", "{harness}");
+    }
     assert!(fx.library.activate("release-notes", "nope", Scope::User, None, false).is_err());
     assert!(fx.library.activate("release-notes", "claude", Scope::Project, None, false).unwrap_err().contains("Choose a project"));
 }

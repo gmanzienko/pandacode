@@ -352,7 +352,7 @@ impl Subagents {
     pub(super) fn route(&mut self, frame: &mut Value, protocol: &Protocol) -> Option<Step> {
         match protocol.config.provider.as_str() {
             "codex" => self.codex(frame, protocol),
-            "kimi" | "opencode" | "antigravity" | "grok" | "pi" | "deepseek" | "commandcode" | "cline" | "kilo" | "omp" | "github-copilot" | "muse" | "devin" | "hermes" => {
+            "kimi" | "opencode" | "antigravity" | "grok" | "pi" | "deepseek" | "commandcode" | "cline" | "kilo" | "omp" | "github-copilot" | "muse" | "devin" | "hermes" | "qoder" => {
                 None
             } // ACP providers expose main-session progress; Agent results remain available.
             _ => self.claude(frame, protocol),
@@ -888,6 +888,18 @@ mod tests {
         );
         assert_eq!(snapshot(&result, "turn/agent").status, "completed");
         assert!(snapshot(&result, "turn/agent").tools.is_empty());
+    }
+    /// Claude's delegation envelopes must not create child state on an ACP harness.
+    #[test]
+    fn acp_harnesses_ignore_claude_child_frames() {
+        for provider in ["qoder", "cline", "kilo"] {
+            let mut p = protocol(provider);
+            let started = p.receive(json!({"type":"system","subtype":"task_started","task_id":"t","tool_use_id":"a","task_type":"local_agent","description":"Review"})).unwrap();
+            assert!(started.events.is_empty(), "{provider}");
+            let streamed = p.receive(json!({"type":"stream_event","parent_tool_use_id":"a","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"child text"}}})).unwrap();
+            assert!(streamed.events.is_empty(), "{provider}");
+            assert!(p.subagents.as_ref().unwrap().children.is_empty(), "{provider}");
+        }
     }
     #[test]
     fn child_approval_resumes_and_results_recover_suffix_without_duplicate_replays() {

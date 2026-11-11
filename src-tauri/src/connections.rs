@@ -24,7 +24,7 @@ const MAX_NAME: usize = 60;
 // on task deletion if this ever matters.
 const MAX_TASKS: usize = 5000;
 const PROVIDERS: &[&str] = &[
-    "claude", "codex", "kimi", "opencode", "glm", "antigravity", "grok", "mimo", "alibaba", "pi", "deepseek", "commandcode", "cline", "kilo", "omp", "github-copilot", "muse", "devin", "zcode", "hermes",
+    "claude", "codex", "kimi", "opencode", "glm", "antigravity", "grok", "mimo", "alibaba", "pi", "deepseek", "commandcode", "cline", "kilo", "omp", "github-copilot", "muse", "devin", "zcode", "hermes", "qoder",
 ];
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -594,6 +594,7 @@ mod tests {
     #[test]
     fn validation_rejects_bad_names_args_env_and_folders() {
         assert!(validated(input("claude"), None).is_ok());
+        assert!(validated(input("qoder"), None).is_ok());
         assert!(validated(Input { provider: "nope".into(), ..input("claude") }, None).is_err());
         assert!(validated(Input { name: " ".into(), ..input("claude") }, None).is_err());
         assert!(validated(Input { name: "x".repeat(61), ..input("claude") }, None).is_err());

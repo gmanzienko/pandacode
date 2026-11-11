@@ -1233,7 +1233,7 @@ pub(crate) async fn list_model_catalog(provider: &str) -> Result<Vec<ModelInfo>,
     let semaphore = &model_discovery_semaphores()[index];
     let _permit = if matches!(
         provider,
-        "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "muse" | "devin" | "zcode" | "hermes"
+        "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "muse" | "devin" | "zcode" | "hermes" | "qoder"
     ) {
         // Saving models refreshes both windows. Queue their bounded metadata
         // queries so one window does not cache incomplete ID-only fallbacks.
@@ -2260,7 +2260,7 @@ impl Protocol {
                     json!({"experimentalApi":true,"requestAttestation":false});
                 request
             }
-            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes" => {
+            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes" | "qoder" => {
                 json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"pandacode","version":"0.1.0"}}})
             }
             _ => {
@@ -2308,7 +2308,7 @@ impl Protocol {
             // ACP: a one-time choice first. With only a lasting one (`allow_always`), approving
             // takes it: only the user's own approval of such a request. PandaCode's automatic
             // paths never approve one (`LASTING_ONLY`): a team worker's declines or stops the turn.
-            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "hermes" => {
+            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "hermes" | "qoder" => {
                 let options = request["params"]["options"].as_array();
                 let kinds = if approved {
                     ["allow_once", "allow_always"]
@@ -2336,7 +2336,7 @@ impl Protocol {
             "codex" => {
                 json!({"id":900,"method":"turn/interrupt","params":{"threadId":self.remote_id,"turnId":self.turn_id}})
             }
-            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes" => {
+            "kimi" | "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes" | "qoder" => {
                 json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":self.remote_id}})
             }
             _ => {
@@ -2379,7 +2379,7 @@ impl Protocol {
             "pi" | "omp" => self.pi(value).map(|step| self.steered(step)),
             "zcode" => self.zcode(value).map(|step| self.steered(step)),
             "muse" => self.muse(value),
-            "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes" => self.acp(value),
+            "opencode" | "antigravity" | "grok" | "deepseek" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes" | "qoder" => self.acp(value),
             _ => self.claude(value),
         }
     }
@@ -4452,6 +4452,16 @@ mod tests {
         assert!(!MCP_HOST_HARNESSES.contains(&"zcode"));
     }
 
+    #[test]
+    fn every_registered_provider_hosts_mcp_tools_or_is_a_documented_exception() {
+        for (provider, _) in PROVIDERS {
+            assert!(
+                MCP_HOST_HARNESSES.contains(&provider) || matches!(provider, "codex" | "zcode"),
+                "{provider} is missing from the MCP host harnesses"
+            );
+        }
+    }
+
     pub(super) fn config(provider: &str) -> RunConfig {
         RunConfig {
             session_id: "local".into(),
@@ -5834,6 +5844,15 @@ mod tests {
         }
         assert!(PROVIDERS.iter().any(|(id, _)| *id == "github-copilot"));
         assert_eq!(model_discovery_index("not-a-provider"), None);
+    }
+
+    #[tokio::test]
+    async fn qoder_model_discovery_queues_behind_a_running_refresh() {
+        let index = model_discovery_index("qoder").unwrap();
+        let permit = model_discovery_semaphores()[index].acquire().await.unwrap();
+        let queued = tokio::time::timeout(Duration::from_millis(100), list_model_catalog("qoder")).await;
+        assert!(queued.is_err(), "qoder must wait for the running discovery: {queued:?}");
+        drop(permit);
     }
 
     #[test]

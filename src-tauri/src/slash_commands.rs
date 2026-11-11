@@ -197,7 +197,7 @@ impl CommandCache {
                 // Process output stays behind the generic message.
                 let warning = if key.0 == "kimi" && error == kimi::AUTH_REQUIRED {
                     kimi::AUTH_REQUIRED
-                } else if matches!(key.0.as_str(), "opencode" | "antigravity" | "grok" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes")
+                } else if matches!(key.0.as_str(), "opencode" | "antigravity" | "grok" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes" | "qoder")
                     && error.starts_with(crate::providers::acp::ACP_STARTUP_TIMEOUT)
                 {
                     crate::providers::acp::ACP_STARTUP_TIMEOUT
@@ -371,6 +371,7 @@ fn validate_provider(provider: &str) -> Result<(), String> {
             | "muse"
             | "devin"
             | "hermes"
+            | "qoder"
     ) {
         return Err("Unknown harness.".into());
     }
@@ -393,7 +394,7 @@ async fn discover_catalog(provider: &str, cwd: &Path, key: Key, started: Instant
         let discovered = match provider {
             "claude" => claude::discover(cwd).await,
             "glm" | "mimo" | "alibaba" => claude::discover_for(provider, cwd).await,
-            "opencode" | "antigravity" | "grok" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes" => {
+            "opencode" | "antigravity" | "grok" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes" | "qoder" => {
                 acp::discover(provider, cwd).await
             }
             "deepseek" => deepseek::discover(cwd),
@@ -429,7 +430,7 @@ pub fn observe_runtime(provider: &str, cwd: &Path, data: &Value) -> bool {
     }
     let value = match provider {
         "claude" | "glm" | "mimo" | "alibaba" => claude::parse_runtime(data),
-        "opencode" | "antigravity" | "grok" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes" => acp::parse_runtime(provider, data),
+        "opencode" | "antigravity" | "grok" | "commandcode" | "cline" | "kilo" | "github-copilot" | "devin" | "hermes" | "qoder" => acp::parse_runtime(provider, data),
         "kimi" => kimi::parse_runtime(data),
         _ => None,
     };
@@ -1191,6 +1192,7 @@ mod tests {
             .unwrap();
         assert_eq!(command(&catalog, "/model").source, "PandaCode");
         assert_eq!(command(&catalog, "/settings").kind, "action");
+        assert!(snapshot("qoder", Path::new("/snapshot-only-project")).await.is_ok());
         assert!(snapshot("unknown", Path::new("/snapshot-only-project"))
             .await
             .is_err());
@@ -1214,16 +1216,18 @@ mod tests {
     #[test]
     fn startup_timeouts_preserve_cached_commands_without_echoing_process_output() {
         let mut cache = CommandCache::default();
-        let key = key("antigravity");
-        let revision = cache.insert(key.clone(), Some(native_catalog(&["/review"])), HashSet::new());
         let timeout = crate::providers::acp::ACP_STARTUP_TIMEOUT;
-        let catalog = ready(cache.commit(key.clone(), revision, Err(format!("{timeout} SECRET process output"))));
-        assert_eq!(catalog.warnings, vec![timeout]);
-        assert_eq!(command(&catalog, "/review").name, "/review");
-        let revision = cache.begin(&key);
-        let catalog = ready(cache.commit(key, revision, Err(acp::NO_COMMANDS.into())));
-        assert_eq!(catalog.warnings, vec![acp::NO_COMMANDS]);
-        assert_eq!(command(&catalog, "/review").name, "/review");
+        for provider in ["antigravity", "qoder"] {
+            let key = key(provider);
+            let revision = cache.insert(key.clone(), Some(native_catalog(&["/review"])), HashSet::new());
+            let catalog = ready(cache.commit(key.clone(), revision, Err(format!("{timeout} SECRET process output"))));
+            assert_eq!(catalog.warnings, vec![timeout], "{provider}");
+            assert_eq!(command(&catalog, "/review").name, "/review", "{provider}");
+            let revision = cache.begin(&key);
+            let catalog = ready(cache.commit(key, revision, Err(acp::NO_COMMANDS.into())));
+            assert_eq!(catalog.warnings, vec![acp::NO_COMMANDS], "{provider}");
+            assert_eq!(command(&catalog, "/review").name, "/review", "{provider}");
+        }
     }
 
     #[test]
