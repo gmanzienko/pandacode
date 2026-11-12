@@ -3,7 +3,7 @@
 A small, native desktop workspace for coding agents. PandaCode runs the coding
 CLIs you already use — **Claude Code, Codex, Kimi Code, OpenCode, GLM Coding
 Plan, Xiaomi MiMo and Alibaba Token Plan** (through Claude Code), **GitHub Copilot CLI, Antigravity,
-xAI's Grok Build, DeepSeek, Command Code, Cline, Kilo Code, Devin CLI and Hermes Agent** (through ACP), **ZCode** (through its app-server protocol), **Pi** and its
+xAI's Grok Build, DeepSeek, Command Code, Cline, Kilo Code, Qoder, Devin CLI and Hermes Agent** (through ACP), **ZCode** (through its app-server protocol), **Pi** and its
 fork **omp** (through Pi's RPC mode), and Meta's **Muse Code** (through its MSP
 protocol) — side by side, with your projects, Git, a
 terminal and a browser in one window.
@@ -390,6 +390,8 @@ PandaCode does not include provider plans or usage.
 [Cline](https://docs.cline.bot/usage/cli-overview) installs with `npm i -g cline`; PandaCode launches `cline --acp`. Sign in once with `cline auth` (or set `CLINE_API_KEY`); the provider and models chosen in Cline apply. See [provider details](docs/providers.md#cline).
 
 [Kilo Code](https://kilo.ai/docs/code-with-ai/platforms/cli) installs with `npm i -g @kilocode/cli`; sign in with `kilo auth login`, then select **Kilo Code** in PandaCode. PandaCode launches `kilo acp` and uses Kilo's configured providers and models. See [provider details](docs/providers.md#kilo-code).
+
+[Qoder](https://docs.qoder.com/en/cli/installation) installs with `npm i -g @qoder-ai/qodercli`; run `qodercli login` once in a terminal, then select **Qoder** in PandaCode. PandaCode launches `qodercli --acp` and uses Qoder's own sign-in and models. See [provider details](docs/providers.md#qoder).
 
 Muse Code installs with Meta's launcher into `~/.local/bin/muse`; run `muse login` once in a terminal. PandaCode launches `muse serve` and speaks MSP, Muse's JSON-RPC session protocol, with its sandbox and approval modes; see [docs/providers.md](docs/providers.md#muse-code) for what each mode does and what Muse cannot express.
 
