@@ -254,6 +254,7 @@ fn config_dir_var(provider: &str) -> Option<&'static str> {
         "pi" => Some("PI_CODING_AGENT_DIR"),
         "opencode" => Some("OPENCODE_CONFIG_DIR"),
         "kilo" => Some("KILO_CONFIG_DIR"),
+        "qoder" => Some("QODER_CONFIG_DIR"),
         _ => None,
     }
 }
@@ -661,6 +662,19 @@ mod tests {
         assert!(missing.contains("API_KEY") && !missing.contains("fixture"));
         let codex = launch_with(&Connection { provider: "codex".into(), secret_env: vec![], ..connection }, |_| None).unwrap();
         assert!(codex.env.contains(&("CODEX_HOME".into(), "/Users/me/.claude-work".into())));
+    }
+
+    #[test]
+    fn qoder_connections_carry_their_own_config_folder() {
+        assert_eq!(config_dir_var("qoder"), Some("QODER_CONFIG_DIR"));
+        let dir = std::env::temp_dir().join("pandacode-qoder-work").display().to_string();
+        let (saved, _) = validated(Input { config_dir: Some(dir.clone()), ..input("qoder") }, None).unwrap();
+        assert_eq!(saved.config_dir, Some(dir));
+        let secret = vec![EnvInput { name: "QODER_CONFIG_DIR".into(), value: Some("v".into()), secret: true }];
+        let error = validated(Input { env: secret, ..input("qoder") }, None).err().unwrap();
+        assert!(error.contains("folder, not a secret"), "{error}");
+        let launch = launch_with(&Connection { provider: "qoder".into(), config_dir: Some("/Users/me/.qoder-work".into()), ..Default::default() }, |_| None).unwrap();
+        assert!(launch.env.contains(&("QODER_CONFIG_DIR".into(), "/Users/me/.qoder-work".into())));
     }
 
     #[test]
