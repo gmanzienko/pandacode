@@ -61,7 +61,7 @@ const COVERAGE: &[Coverage] = &[
     Coverage { provider: "pi", name: "Pi", status: "off", detail: "The install report and provider attribution headers." },
     Coverage { provider: "muse", name: "Muse Code", status: "off", detail: "Telemetry, through its telemetry.enabled setting." },
     Coverage { provider: "cline", name: "Cline", status: "manual", detail: "No per-launch switch. Opt out in Cline’s settings." },
-    Coverage { provider: "qoder", name: "Qoder", status: "manual", detail: "The OpenTelemetry export stops. Qoder’s device fingerprint and AI-code statistics need its own settings." },
+    Coverage { provider: "qoder", name: "Qoder", status: "manual", detail: "The OpenTelemetry export stops. AI-code statistics need Qoder’s own settings; the device fingerprint is not covered." },
     Coverage { provider: "omp", name: "Oh My Pi", status: "unknown", detail: "No verified switch." },
     Coverage { provider: "github-copilot", name: "GitHub Copilot CLI", status: "unknown", detail: "No verified switch." },
     Coverage { provider: "antigravity", name: "Antigravity", status: "unknown", detail: "No verified switch." },
