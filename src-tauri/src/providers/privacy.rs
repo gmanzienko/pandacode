@@ -4,7 +4,8 @@
 //! turning the switch off restores their own settings on the next launch.
 //!
 //! Switch names were read from the installed CLIs (Claude Code 2.1.311, Codex 0.162.1, Kimi
-//! Code, Grok 1.0.62, dsh, Command Code 1.88, OpenCode, Cline 3.0.52, Muse 1.4.14, Pi 0.84), not guessed.
+//! Code, Grok 1.0.62, dsh, Command Code 1.88, OpenCode, Cline 3.0.52, Muse 1.4.14, Pi 0.84,
+//! Qoder 1.1.13), not guessed.
 use serde::Serialize;
 
 /// Every value only opts out, so the whole list is safe on every harness. Agents' own
@@ -12,6 +13,8 @@ use serde::Serialize;
 const ENVIRONMENT: &[(&str, &str)] = &[
     // Command Code's only switch. Claude Code also reads it as DISABLE_TELEMETRY.
     ("DO_NOT_TRACK", "1"),
+    // Stops OpenTelemetry export (Qoder). Must be "true": the bundled getBooleanFromEnv rejects "1".
+    ("OTEL_SDK_DISABLED", "true"),
     // Claude Code and its GLM/MiMo relays: usage telemetry, Sentry reports, the rating survey.
     // Grok reads the first two as well. In Claude Code they also stop GrowthBook feature flags.
     ("DISABLE_TELEMETRY", "1"),
@@ -58,6 +61,7 @@ const COVERAGE: &[Coverage] = &[
     Coverage { provider: "pi", name: "Pi", status: "off", detail: "The install report and provider attribution headers." },
     Coverage { provider: "muse", name: "Muse Code", status: "off", detail: "Telemetry, through its telemetry.enabled setting." },
     Coverage { provider: "cline", name: "Cline", status: "manual", detail: "No per-launch switch. Opt out in Cline’s settings." },
+    Coverage { provider: "qoder", name: "Qoder", status: "manual", detail: "The OpenTelemetry export stops. Qoder’s device fingerprint and AI-code statistics need its own settings." },
     Coverage { provider: "omp", name: "Oh My Pi", status: "unknown", detail: "No verified switch." },
     Coverage { provider: "github-copilot", name: "GitHub Copilot CLI", status: "unknown", detail: "No verified switch." },
     Coverage { provider: "antigravity", name: "Antigravity", status: "unknown", detail: "No verified switch." },
@@ -139,7 +143,7 @@ mod tests {
         seen.sort();
         seen.dedup();
         assert_eq!(seen.len(), COVERAGE.len());
-        for id in ["claude", "codex", "kimi", "opencode", "glm", "antigravity", "grok", "mimo", "alibaba", "pi", "deepseek", "commandcode", "cline", "omp", "github-copilot", "muse"] {
+        for id in ["claude", "codex", "kimi", "opencode", "glm", "antigravity", "grok", "mimo", "alibaba", "pi", "deepseek", "commandcode", "cline", "omp", "github-copilot", "muse", "qoder"] {
             assert!(seen.contains(&id), "{id} has no privacy entry");
         }
         assert!(COVERAGE.iter().all(|c| ["off", "manual", "unknown"].contains(&c.status)));
@@ -161,6 +165,7 @@ mod tests {
         assert!(environment_when(false).is_empty());
         assert!(arguments_when(false, "codex").is_empty());
         assert!(environment_when(true).contains(&("DO_NOT_TRACK", "1")));
+        assert!(environment_when(true).contains(&("OTEL_SDK_DISABLED", "true")));
         assert_eq!(arguments_when(true, "codex"), CODEX_ARGUMENTS);
         // Only Codex takes `-c` at launch; others would reject it (Muse takes it after `serve`).
         assert_eq!(muse_arguments_when(true), MUSE_ARGUMENTS);
