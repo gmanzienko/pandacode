@@ -306,10 +306,10 @@ Voice dictation inserts a draft without sending it. Transcribe on your computer 
   Muse, Qoder, and OpenCode sharing) plus `DO_NOT_TRACK=1`. Your agent config files
   are not changed. Each agent's row shows what the switch covers. Cline has no
   per-launch switch, so turn it off in Cline's own settings. Qoder's
-  OpenTelemetry export stops, but its code-statistics reporting and device
-  fingerprint need Qoder's own settings. With the switch on, Claude Code also
-  stops fetching remote feature flags (it uses its defaults) and can't take
-  sessions started remotely on this computer.
+  OpenTelemetry export stops, but its code-statistics reporting needs Qoder's
+  own settings and its device fingerprint is not covered. With the switch on,
+  Claude Code also stops fetching remote feature flags (it uses its defaults)
+  and can't take sessions started remotely on this computer.
 
 A few automatic checks send no personal data — just plain requests for public
 information:
