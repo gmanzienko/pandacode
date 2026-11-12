@@ -158,7 +158,7 @@ fn parse_version(input: &str) -> Option<Version> {
 use crate::providers::PROVIDERS;
 
 /// Families with a verified release feed and updater; every other agent is listed as manual.
-const UPDATABLE: [&str; 6] = ["claude", "codex", "kimi", "opencode", "grok", "cline"];
+const UPDATABLE: [&str; 7] = ["claude", "codex", "kimi", "opencode", "grok", "cline", "qoder"];
 
 fn family(provider: &str) -> &str {
     if matches!(provider, "glm" | "mimo" | "alibaba") {
@@ -305,6 +305,10 @@ fn metadata_endpoint(source: &str) -> Option<(&'static str, &'static str)> {
         )),
         "npm:opencode" => Some(("https://registry.npmjs.org/opencode-ai/latest", "version")),
         "npm:cline" => Some(("https://registry.npmjs.org/cline/latest", "version")),
+        "npm:qoder" => Some((
+            "https://registry.npmjs.org/@qoder-ai%2fqodercli/latest",
+            "version",
+        )),
         "kimi" => Some(("https://cdn.kimi.com/kimi-code/latest", "text")),
         "kimi-python" => Some(("https://pypi.org/pypi/kimi-cli/json", "info.version")),
         "grok" => Some((
@@ -743,6 +747,17 @@ mod tests {
         assert_ne!(
             metadata_endpoint("claude"),
             metadata_endpoint("claude:stable")
+        );
+    }
+
+    #[test]
+    fn qoder_release_feed_is_the_fixed_scoped_npm_endpoint() {
+        assert_eq!(
+            metadata_endpoint("npm:qoder"),
+            Some((
+                "https://registry.npmjs.org/@qoder-ai%2fqodercli/latest",
+                "version"
+            ))
         );
     }
 

@@ -49,6 +49,7 @@ pub(super) fn docs(provider: &str) -> Option<&'static str> {
         "opencode" => "https://opencode.ai/docs/",
         "grok" => "https://docs.x.ai/build",
         "cline" => "https://docs.cline.bot/usage/cli-overview",
+        "qoder" => "https://docs.qoder.com/en/cli/installation",
         "antigravity" => "https://antigravity.google/docs/ide/extensions",
         "devin" => "https://docs.devin.ai/cli",
         "hermes" => "https://hermes-agent.org",
@@ -213,6 +214,7 @@ fn package(provider: &str) -> Option<&'static str> {
         "codex" => Some("@openai/codex"),
         "opencode" => Some("opencode-ai"),
         "cline" => Some("cline"),
+        "qoder" => Some("@qoder-ai/qodercli"),
         _ => None,
     }
 }
@@ -1029,6 +1031,31 @@ mod tests {
         assert!(args.contains(&"@openai/codex@0.156.1".into()));
         assert!(args.contains(&"--@openai:registry=https://registry.npmjs.org".into()));
         assert!(!args.iter().any(|arg| arg == "-c" || arg.contains("curl")));
+    }
+
+    #[test]
+    fn qoder_updates_use_the_scoped_npm_package_and_official_docs() {
+        assert_eq!(package("qoder"), Some("@qoder-ai/qodercli"));
+        assert_eq!(
+            docs("qoder"),
+            Some("https://docs.qoder.com/en/cli/installation")
+        );
+        assert!(super::super::UPDATABLE.contains(&"qoder"));
+        let plan = Plan::Npm {
+            node: "/tools/node".into(),
+            cli: "/tools/npm/bin/npm-cli.js".into(),
+            prefix: "/tools/my prefix".into(),
+            package: "@qoder-ai/qodercli",
+        };
+        assert_eq!(
+            source(
+                &installation("qoder", Path::new("/unknown/qodercli")),
+                &super::super::parse_version("1.1.13").unwrap(),
+                Some(&plan)
+            )
+            .unwrap(),
+            "npm:qoder"
+        );
     }
 
     #[test]
