@@ -14,7 +14,7 @@ pub(super) const SIGN_IN: &str =
 /// Qoder Desktop and the Agent SDK export SDK variables into the shells they spawn.
 /// Inheriting them would hand the CLI the host's SDK identity and auth payload
 /// instead of its own sign-in.
-const SDK_ENVIRONMENT: [&str; 4] = [
+pub(crate) const SDK_ENVIRONMENT: [&str; 4] = [
     "QODER_AGENT_SDK_ENTRYPOINT",
     "QODER_SDK_ACCESS_TOKEN",
     "QODER_SDK_AUTH_PAYLOAD_FILE",

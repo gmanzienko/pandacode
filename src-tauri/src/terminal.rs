@@ -462,8 +462,9 @@ fn harness_command(context: &HarnessContext<'_>, root: &Path) -> Result<CommandB
     }
     let mut cmd = crate::providers::pty_command(&executable)?;
     crate::provider_settings::apply_environment(context.provider, &mut cmd);
-    for name in crate::providers::claude_auth::removed_environment(context.provider) {
-        cmd.env_remove(name);
+    for name in crate::providers::claude_auth::removed_environment(context.provider) { cmd.env_remove(name); }
+    if context.provider == "qoder" {
+        for name in crate::providers::qoder::SDK_ENVIRONMENT { cmd.env_remove(name); }
     }
     cmd.args(args);
     let existing = |key: &str| {
@@ -582,7 +583,7 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
             }
         }
     }
-    if !matches!(provider, "codex" | "claude" | "kimi" | "glm" | "opencode" | "grok" | "mimo" | "alibaba" | "pi" | "omp" | "github-copilot" | "muse" | "cline" | "devin" | "hermes") {
+    if !matches!(provider, "codex" | "claude" | "kimi" | "glm" | "opencode" | "grok" | "mimo" | "alibaba" | "pi" | "omp" | "github-copilot" | "muse" | "cline" | "devin" | "hermes" | "qoder") {
         return Err("Choose a supported coding harness.".into());
     }
     if provider == "github-copilot" {
@@ -622,7 +623,7 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
         args.push(
             match provider {
                 "codex" | "muse" => "resume",
-                "claude" | "glm" | "mimo" | "alibaba" | "grok" | "devin" | "hermes" => "--resume",
+                "claude" | "glm" | "mimo" | "alibaba" | "grok" | "devin" | "hermes" | "qoder" => "--resume",
                 "cline" => "--id",
                 _ => "--session",
             }
@@ -727,6 +728,17 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
                 args.extend(["--auto-approve".into(), "false".into()]);
             }
         }
+        "qoder" => {
+            // The TUI's permission modes have no Plan, and it has no /plan command either.
+            let mode = match context.mode {
+                "plan" => return Err("Qoder's console cannot start in Plan mode. Use task chat instead.".into()),
+                "auto" => "accept_edits",
+                "full" => "bypass_permissions",
+                // Approve for me is Claude Code's reviewer, which Qoder does not run; keep manual approval.
+                _ => "default",
+            };
+            args.extend(["--permission-mode".into(), mode.into()]);
+        }
         _ => {
             match context.mode {
                 "plan" => args.push("--plan".into()),
@@ -760,7 +772,7 @@ fn harness_arguments(context: &HarnessContext<'_>) -> Result<Vec<String>, String
                 format!("model_reasoning_effort=\"{effort}\""),
             ]),
             "claude" | "glm" | "mimo" | "alibaba" => args.extend(["--effort".into(), effort.into()]),
-            "grok" => args.extend(["--reasoning-effort".into(), effort.into()]),
+            "grok" | "qoder" => args.extend(["--reasoning-effort".into(), effort.into()]),
             "pi" | "omp" | "cline" => args.extend(["--thinking".into(), effort.into()]),
             "muse" => args.extend(["--reasoning-effort".into(), effort.into()]),
             _ => {} // The Kimi TUI restores its persisted thinking setting.
@@ -1893,6 +1905,74 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
         drop(pty.slave);
+    }
+}
+
+// The console module above is Unix-gated for its PTY tests; these argv assertions run on every platform.
+#[cfg(test)]
+mod console_arguments_tests {
+    use super::*;
+
+    #[test]
+    fn qoder_console_resumes_with_the_task_mode_model_and_effort() {
+        let context = HarnessContext {
+            session_id: "task",
+            provider: "qoder",
+            resume_id: Some("ses_qoder_123"),
+            model: Some("qmodel_latest"),
+            reasoning_effort: Some("xhigh"),
+            mode: "ask",
+        };
+        let args = harness_arguments(&context).unwrap();
+        assert_eq!(
+            args,
+            [
+                "--resume",
+                "ses_qoder_123",
+                "--permission-mode",
+                "default",
+                "--model",
+                "qmodel_latest",
+                "--reasoning-effort",
+                "xhigh"
+            ]
+        );
+    }
+
+    #[test]
+    fn qoder_console_maps_task_modes_to_the_tuis_snake_case_permissions() {
+        let context = HarnessContext {
+            session_id: "task",
+            provider: "qoder",
+            resume_id: None,
+            model: None,
+            reasoning_effort: None,
+            mode: "ask",
+        };
+        for (mode, permission) in [
+            ("ask", "default"),
+            ("auto", "accept_edits"),
+            ("full", "bypass_permissions"),
+            ("review", "default"),
+        ] {
+            let args = harness_arguments(&HarnessContext { mode, ..context }).unwrap();
+            assert_eq!(args, ["--permission-mode", permission], "{mode}");
+        }
+    }
+
+    #[test]
+    fn qoder_console_cannot_start_in_plan_mode() {
+        let context = HarnessContext {
+            session_id: "task",
+            provider: "qoder",
+            resume_id: None,
+            model: None,
+            reasoning_effort: None,
+            mode: "plan",
+        };
+        let error = harness_arguments(&context).unwrap_err();
+        assert!(error.contains("Plan mode"), "{error}");
+        assert!(error.contains("task chat"), "{error}");
     }
 }
 
