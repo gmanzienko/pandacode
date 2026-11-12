@@ -368,7 +368,24 @@ const catalogs: Record<ProviderId, ProviderModel[]> = {
   zcode: [
     { id: 'zcproxy/GLM-5.3', name: 'zcproxy/GLM-5.3', description: 'OmniRouter', reasoningEfforts: ['low', 'high', 'max'].map(effort => ({ id: effort, name: effort[0].toUpperCase() + effort.slice(1), description: '' })), defaultReasoningEffort: 'max', contextWindow: 200000 },
   ],
-  qoder: [],
+  // Recorded from `qodercli --acp` 1.1.13: each model lists its own reasoning_effort option.
+  qoder: ([
+    ['auto', 'Auto (default)', 'Vision · 0.50x Credit', [], ''],
+    ['ultimate', 'Ultimate', 'Reasoning · Vision · 0.40x Credit', ['xhigh', 'high', 'low', 'max', 'medium'], 'xhigh'],
+    ['efficient', 'Efficient', 'Vision · 0.30x Credit', [], ''],
+    ['smodel', 'Sonus', 'Reasoning · Vision · New · 8.00x Credit', ['xhigh', 'high', 'low', 'max', 'medium'], 'xhigh'],
+    ['cmodel', 'Cantus', 'Reasoning · Vision · New · 4.00x Credit', ['xhigh', 'high', 'low', 'max', 'medium'], 'xhigh'],
+    ['qmodel_latest', 'Qwen4-Max-Preview', 'Reasoning · Vision · New · 0.10x Credit', ['xhigh', 'high', 'low', 'none'], 'xhigh'],
+    ['qmodel_38max', 'Qwen3.8-Max', 'Reasoning · Vision · New · 0.20x Credit', ['xhigh', 'low', 'medium', 'none'], 'xhigh'],
+    ['qfmodel', 'Qwen3.8-Flash', 'Reasoning · Vision · New · 0.04x Credit', ['xhigh', 'low', 'medium', 'none'], 'xhigh'],
+    ['kmodel_latest', 'Kimi-K3.1-Pro', 'Vision · New · 1.00x Credit', ['high', 'low', 'max'], 'high'],
+    ['kmodel', 'Kimi-K2.8-Preview', 'Vision · New · 0.80x Credit', ['high', 'low', 'max'], 'high'],
+    ['gmodel', 'GLM-5.3', 'Reasoning · Vision · New · 0.80x Credit', ['high', 'low', 'max'], 'high'],
+    ['gfmodel', 'GLM-5.3-Flash', 'Reasoning · Vision · New · 0.10x Credit', ['high', 'max'], 'high'],
+    ['dmodel', 'DeepSeek-V4-Pro', 'Reasoning · Vision · New · 0.50x Credit', ['high', 'max', 'none'], 'high'],
+    ['dfmodel', 'DeepSeek-Flash', 'Reasoning · Vision · New · 0.10x Credit', ['high', 'max', 'low', 'none'], 'high'],
+    ['mmodel', 'MiniMax-M3.1-Flash', 'Reasoning · Vision · New · 0.10x Credit', ['xhigh', 'high', 'low', 'max', 'medium'], 'xhigh'],
+  ] as [string, string, string, string[], string][]).map(([id, name, description, efforts, effort]) => ({ id, name, description, reasoningEfforts: efforts.map(value => ({ id: value, name: value === 'xhigh' ? 'Extra high' : value[0].toUpperCase() + value.slice(1), description: '' })), ...(effort ? { defaultReasoningEffort: effort } : {}) })),
 };
 // `?bench=diff` (or localStorage `pandacode.bench` = `diff`) adds synthetic, deterministic
 // patches of known size for tests/diff-perf.spec.ts; other runs never see them.
