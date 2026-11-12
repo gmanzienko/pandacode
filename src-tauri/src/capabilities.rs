@@ -592,6 +592,16 @@ fn scan_harness_configs(
                 }
             }
         }
+        "qoder" => {
+            if let Some(value) = read_json(&home.join(".qoder/settings.json")) {
+                entries.extend(parse_mcp_json(harness, "~/.qoder/settings.json", &value, "mcpServers"));
+            }
+            if let Some(project) = project {
+                if let Some(value) = read_json(&project.join(".mcp.json")) {
+                    entries.extend(parse_mcp_json(harness, "Project .mcp.json", &value, "mcpServers"));
+                }
+            }
+        }
         _ => {}
     }
     entries.extend(scan_skill_dirs(harness, home, project, homes));
@@ -883,6 +893,41 @@ env = { API_KEY = "secret" }
         assert!(entries
             .iter()
             .any(|item| item.harness == "cline" && item.kind == "skill" && item.name == "doc-gen"));
+        fs::remove_dir_all(home).unwrap();
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn qoder_mcp_and_skills_inventory_reads_configured_paths() {
+        let home = fixture_home("qoder-home");
+        let project = fixture_home("qoder-project");
+        fs::create_dir_all(home.join(".qoder")).unwrap();
+        fs::write(
+            home.join(".qoder/settings.json"),
+            r#"{"mcpServers":{"local-tool":{"command":"node","args":["server.js"]}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join(".mcp.json"),
+            r#"{"mcpServers":{"project-tool":{"command":"node","args":["project.js"]}}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(home.join(".agents/skills/code-review")).unwrap();
+        fs::create_dir_all(project.join(".agents/skills/doc-gen")).unwrap();
+        let entries = scan_harness_configs("qoder", &home, Some(&project), &Homes::default());
+        let servers: Vec<_> = entries
+            .iter()
+            .filter(|item| item.harness == "qoder" && item.kind == "mcp server")
+            .collect();
+        assert_eq!(servers.len(), 2);
+        assert!(servers.iter().any(|item| item.name == "local-tool" && item.source == "~/.qoder/settings.json"));
+        assert!(servers.iter().any(|item| item.name == "project-tool" && item.source == "Project .mcp.json"));
+        assert!(entries
+            .iter()
+            .any(|item| item.harness == "qoder" && item.kind == "skill" && item.name == "code-review"));
+        assert!(entries
+            .iter()
+            .any(|item| item.harness == "qoder" && item.kind == "skill" && item.name == "doc-gen"));
         fs::remove_dir_all(home).unwrap();
         fs::remove_dir_all(project).unwrap();
     }
