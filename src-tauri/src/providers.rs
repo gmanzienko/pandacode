@@ -845,7 +845,7 @@ pub(crate) fn provider_command(provider: &str, path: &Path) -> Result<Command, S
     Ok(command)
 }
 
-fn executable_name(name: &str) -> &str {
+pub(crate) fn executable_name(name: &str) -> &str {
     match name {
         "glm" | "mimo" | "alibaba" => "claude",
         "antigravity" if cfg!(windows) => "agy_acp_server",

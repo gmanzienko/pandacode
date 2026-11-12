@@ -158,7 +158,9 @@ fn parse_version(input: &str) -> Option<Version> {
 use crate::providers::PROVIDERS;
 
 /// Families with a verified release feed and updater; every other agent is listed as manual.
-const UPDATABLE: [&str; 7] = ["claude", "codex", "kimi", "opencode", "grok", "cline", "qoder"];
+const UPDATABLE: [&str; 7] = [
+    "claude", "codex", "kimi", "opencode", "grok", "cline", "qoder",
+];
 
 fn family(provider: &str) -> &str {
     if matches!(provider, "glm" | "mimo" | "alibaba") {

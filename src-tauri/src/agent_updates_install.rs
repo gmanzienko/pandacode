@@ -244,7 +244,7 @@ fn npm_package(installation: &Installation, package: &str, windows: bool) -> Opt
         if metadata["name"].as_str() != Some(package) {
             continue;
         }
-        let name = family(&installation.provider);
+        let name = crate::providers::executable_name(&installation.provider);
         let Some(bin) = metadata["bin"]
             .as_str()
             .or_else(|| metadata["bin"][name].as_str())
@@ -940,6 +940,31 @@ mod tests {
     }
 
     #[test]
+    fn npm_ownership_resolves_qoder_by_its_declared_qodercli_bin_key() {
+        let dir = fixture();
+        let package = dir.join("lib/node_modules/@qoder-ai/qodercli");
+        std::fs::create_dir_all(package.join("bundle")).unwrap();
+        let bin = package.join("bundle/qodercli.js");
+        std::fs::write(&bin, "fixture").unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"name":"@qoder-ai/qodercli","bin":{"qodercli":"bundle/qodercli.js"}}"#,
+        )
+        .unwrap();
+        let install = installation("qoder", &bin);
+        let root = npm_package(&install, "@qoder-ai/qodercli", false);
+        assert!(
+            root.is_some(),
+            "the manifest declares bin.qodercli, not bin.qoder"
+        );
+        assert_eq!(
+            global_prefix(&root.unwrap(), "@qoder-ai/qodercli", false),
+            Some(dir.canonicalize().unwrap())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn windows_npm_shim_must_name_the_exact_manifest_entry() {
         let dir = fixture();
         let package = dir.join("node_modules/@openai/codex");
@@ -1056,6 +1081,17 @@ mod tests {
             .unwrap(),
             "npm:qoder"
         );
+        let command =
+            update_command(&plan, &super::super::parse_version("1.1.13").unwrap()).unwrap();
+        assert_eq!(command.get_program(), "/tools/node");
+        let args: Vec<_> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--prefix=/tools/my prefix".into()));
+        assert!(args.contains(&"@qoder-ai/qodercli@1.1.13".into()));
+        assert!(args.contains(&"--@qoder-ai:registry=https://registry.npmjs.org".into()));
+        assert!(!args.iter().any(|arg| arg == "-c" || arg.contains("curl")));
     }
 
     #[test]
