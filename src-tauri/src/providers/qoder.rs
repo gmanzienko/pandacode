@@ -679,4 +679,90 @@ mod tests {
         assert!(models.iter().any(|m| m.id == "default"));
         assert!(models.iter().any(|m| !m.reasoning_efforts.is_empty()));
     }
+
+    /// Needs a signed-in Qoder CLI. Two small turns on `efficient` in a throwaway
+    /// git repo: the first writes a file, the second resumes the same session and
+    /// reads it back. A resumed turn that kept the id and still reached a tool is
+    /// the proof `session/resume` works; the advertised capability alone is not.
+    #[tokio::test]
+    #[ignore = "requires an installed, signed-in Qoder CLI; sends two short prompts"]
+    async fn installed_qoder_runs_and_resumes_a_task() {
+        super::super::widen_process_path();
+        let dir = std::env::temp_dir().join(format!("pandacode-qoder-live-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.canonicalize().unwrap();
+        // The repo is removed even when an assertion below fails.
+        let _cleanup = Cleanup(cwd.clone());
+        crate::secret_store::setup(&cwd);
+        let init = std::process::Command::new("git").args(["init", "-q"]).current_dir(&cwd).stdin(std::process::Stdio::null()).output().expect("git init");
+        assert!(init.status.success(), "git init failed in the throwaway repo");
+        let path = executable("qoder").expect("Install Qoder CLI first");
+        // Unique per run, so the resumed turn can only get it from the file or the session.
+        let word = format!("PANDA-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos() % 100_000);
+        let turn = |prompt: String, resume: Option<String>| {
+            let mut config = super::super::tests::config("qoder");
+            config.session_id = "qoder-live-resume".into();
+            config.cwd = cwd.clone();
+            config.model = "efficient".into();
+            config.prompt = prompt;
+            config.resume_id = resume;
+            let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
+            let seen = events.clone();
+            let (input, receiver) = tokio::sync::mpsc::unbounded_channel::<RunInput>();
+            let approvals = input.clone();
+            let sink: Sink = Arc::new(move |event| {
+                if event.kind == "approval" {
+                    if let Some(request_id) = event.request_id.clone() {
+                        let _ = approvals.send(RunInput::Approval { request_id, approved: true });
+                    }
+                }
+                seen.lock().unwrap().push(event);
+            });
+            let mut command = super::super::provider_command("qoder", &path).unwrap();
+            super::super::configure_command(&mut command, &config);
+            async move {
+                // A closed input channel means Stop; hold it open for the turn.
+                let _input = input;
+                let run = run_process_with_tools(config, sink, receiver, command, Vec::new(), None);
+                let limit = tokio::time::Duration::from_secs(180);
+                let result = tokio::time::timeout(limit, run).await.map_err(|_| "the turn timed out".to_string()).and_then(|r| r);
+                (events.lock().unwrap().clone(), result)
+            }
+        };
+        let text = |events: &[AgentEvent]| events.iter().filter(|e| e.kind == "text" || e.kind == "delta").map(|e| e.text.as_str()).collect::<String>();
+        let (first, outcome) = turn(format!("Create a file named panda.txt in the current directory containing exactly this word: {word}. Use your file-writing tool, then reply with the word."), None).await;
+        outcome.expect("the first turn should finish");
+        let session = first.iter().find(|event| event.kind == "session").expect("a session id").text.clone();
+        let (second, outcome) = turn("Read panda.txt with your file-reading tool and reply with exactly the word it contains.".into(), Some(session.clone())).await;
+        // Delete before asserting, so a failed assertion still leaves no Qoder history.
+        let mut pipe = Pipe::spawn(command(&path).unwrap(), &cwd, STARTUP).unwrap();
+        pipe.send(&initialize()).await.unwrap();
+        pipe.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/delete","params":{"sessionId":session.clone()}})).await.unwrap();
+        while let Ok(frame) = pipe.read().await {
+            if frame["id"] == 2 {
+                assert!(frame.get("error").is_none(), "{frame}");
+                break;
+            }
+        }
+        pipe.finish().await;
+        outcome.expect("the resumed turn should finish");
+        let written = std::fs::read_to_string(cwd.join("panda.txt")).expect("the first turn should have written panda.txt");
+        assert!(written.contains(&word), "{written:?}");
+        assert!(first.iter().any(|event| event.tool.is_some()), "the first turn should have called a tool");
+        assert!(text(&first).contains(&word), "{:?}", first.iter().map(|e| (&e.kind, &e.text)).collect::<Vec<_>>());
+        assert_eq!(second.iter().find(|event| event.kind == "session").expect("a session id").text, session, "resume must reuse the saved session");
+        assert!(second.iter().any(|event| event.tool.is_some()), "the resumed turn should have called a tool");
+        assert!(text(&second).contains(&word), "{:?}", second.iter().map(|e| (&e.kind, &e.text)).collect::<Vec<_>>());
+        for event in first.iter().chain(second.iter()) {
+            assert!(!event.text.contains("Bearer "), "a run must never surface the host token");
+        }
+    }
+
+    /// Removes the throwaway repo when the test ends, pass or fail.
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 }
