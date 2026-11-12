@@ -887,5 +887,14 @@
   {"provider": "github-copilot", "model": "gpt-5.4-mini", "card": "openrouter-gpt-5.4-mini"},
   {"provider": "github-copilot", "model": "gpt-5.3-codex", "card": "openrouter-gpt-5.3-codex"},
   {"provider": "github-copilot", "model": "gemini-3.1-pro-preview", "card": "openrouter-gemini-3.1-pro-preview"},
-  {"provider": "github-copilot", "model": "gemini-3.5-flash", "card": "openrouter-gemini-3.5-flash"}
+  {"provider": "github-copilot", "model": "gemini-3.5-flash", "card": "openrouter-gemini-3.5-flash"},
+  {"provider": "qoder", "model": "qmodel_38max", "card": "openrouter-qwen3.8-max-0902"},
+  {"provider": "qoder", "model": "qfmodel", "card": "openrouter-qwen3.8-flash"},
+  {"provider": "qoder", "model": "kmodel_latest", "card": "openrouter-kimi-k3.1-pro"},
+  {"provider": "qoder", "model": "kmodel", "card": "kimi-k2.8-preview"},
+  {"provider": "qoder", "model": "gmodel", "card": "openrouter-glm-5.3"},
+  {"provider": "qoder", "model": "gfmodel", "card": "openrouter-glm-5.3-flash"},
+  {"provider": "qoder", "model": "dmodel", "card": "openrouter-deepseek-v4-pro"},
+  {"provider": "qoder", "model": "dfmodel", "card": "openrouter-deepseek-v4.1-flash"},
+  {"provider": "qoder", "model": "mmodel", "card": "openrouter-minimax-m3.1-flash"}
 ]

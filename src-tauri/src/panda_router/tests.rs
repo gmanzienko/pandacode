@@ -423,6 +423,32 @@ fn every_harness_map_entry_names_a_card() {
     }
 }
 
+#[test]
+fn qoder_third_party_slugs_resolve_to_their_cards() {
+    for (model, card) in [
+        ("qmodel_38max", "openrouter-qwen3.8-max-0902"),
+        ("qfmodel", "openrouter-qwen3.8-flash"),
+        ("kmodel_latest", "openrouter-kimi-k3.1-pro"),
+        ("kmodel", "kimi-k2.8-preview"),
+        ("gmodel", "openrouter-glm-5.3"),
+        ("gfmodel", "openrouter-glm-5.3-flash"),
+        ("dmodel", "openrouter-deepseek-v4-pro"),
+        ("dfmodel", "openrouter-deepseek-v4.1-flash"),
+        ("mmodel", "openrouter-minimax-m3.1-flash"),
+    ] {
+        assert_eq!(resolve_card("qoder", model, ""), Some(card), "{model}");
+    }
+}
+
+#[test]
+fn qoder_exclusive_slugs_stay_unrated() {
+    // Unrated by design: Qoder prices in credits, not USD, and Sonus/Cantus have no benchmarks.
+    // A user's S/A/B/C/D rank in Settings makes them routable through a synthetic card.
+    for model in ["auto", "ultimate", "efficient", "smodel", "cmodel", "qmodel_latest"] {
+        assert_eq!(resolve_card("qoder", model, ""), None, "{model}");
+    }
+}
+
 
 const MID_TASK: &str = "Refactor the session store so drafts and published tasks share one query path, update the callers in three modules and keep the tests passing.";
 
