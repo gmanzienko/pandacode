@@ -270,6 +270,22 @@ test('launcher keeps its chosen harness and model through main-window context sy
   await expect.poll(async () => JSON.parse(await page.locator('html').getAttribute('data-last-launch') || '{}')).toMatchObject({provider:'claude',model:'opus',reasoningEffort:null,mode:'ask'});
 });
 
+test('launcher lists a model for every installed harness', async ({page}) => {
+  await instrumentLauncher(page);
+  await page.goto('/?view=launcher');
+  const missing = await page.evaluate(async () => {
+    const {overlayCall} = await import('/src/overlay-client.ts');
+    const providers = await overlayCall<{id:string;installed:boolean}[]>('list_providers');
+    const empty: string[] = [];
+    for (const provider of providers.filter(provider => provider.installed)) {
+      const models = await overlayCall<unknown[]>('list_provider_models',{provider:provider.id});
+      if (!models.length) empty.push(provider.id);
+    }
+    return empty;
+  });
+  expect(missing).toEqual([]);
+});
+
 test('launcher blocks starting a task while a model change is saving', async ({page}) => {
   await instrumentLauncher(page, `if (command === 'overlay_select_model') await new Promise(resolve => {window.__releaseModelSave=resolve;});`);
   await page.goto('/?view=launcher');
