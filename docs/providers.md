@@ -1126,6 +1126,106 @@ Verified against `kilo` 7.3.41 on 2026-10-24 with real ACP metadata. Recorded
 frames back `providers/kilo.rs` tests; `live_kilo_lists_models` is an ignored,
 opt-in smoke test that reads the installed CLI's catalog without prompting.
 
+## Qoder
+
+Qoder (`qodercli`, installed with `npm i -g @qoder-ai/qodercli`) exposes ACP v1 with
+`qodercli --acp`, so PandaCode drives it with the shared ACP adapter
+(`providers/qoder.rs` holds its quirks). On Windows the npm `qodercli.cmd` shim
+resolves to the package's declared bin, launched under Node so paths, JSON and model
+names never become shell syntax. Official docs: [CLI installation](https://docs.qoder.com/en/cli/installation).
+
+**Sign-in.** Qoder keeps its own sign-in (`qodercli login` in a terminal). Without it,
+`session/new` fails with ACP `-32000`, and the turn stops with “Qoder is not signed in.
+Run `qodercli login` in a terminal, then send again.” PandaCode never starts Qoder's
+browser login itself. Qoder Desktop and the Agent SDK export SDK variables into the
+shells they spawn; PandaCode removes `QODER_AGENT_SDK_ENTRYPOINT`,
+`QODER_SDK_ACCESS_TOKEN`, `QODER_SDK_AUTH_PAYLOAD_FILE` and `QODER_AUTH_STDIN` from
+every task, discovery and console launch, so the CLI uses its own sign-in instead of
+the host's SDK identity and auth payload.
+
+**Models and effort.** `session/new` advertises fifteen models with opaque ids
+(`auto`, `ultimate`, `efficient`, `smodel`, …) beside their display names. Discovery
+opens one empty session, switches through every model in order (each switch answers in
+about a millisecond) to read that model's `reasoning_effort` choices, then deletes the
+session even if a switch fails; no prompt is sent and no inference runs. The effort
+option shares the `model` category, so it is matched by its exact id. Thirteen models
+advertise efforts; `auto` and `efficient` advertise none, and an effort chosen for a
+model that advertises none fails the turn (“This model does not advertise an adjustable
+reasoning effort. Choose harness settings.”). Default leaves selection to Qoder. Qoder
+prices models in credits, not USD, and the multiplier in a description drifts between
+reads, so the catalog shows the wire's names and descriptions and pins no price. Nine
+of the fifteen models resolve to Panda Router cards; `auto`, `ultimate`, `efficient`,
+`smodel` (Sonus), `cmodel` (Cantus) and `qmodel_latest` (Qwen4-Max-Preview) stay
+unrated — credits are not USD, Sonus and Cantus have no published benchmarks, and no
+context window arrives on the wire — so they are never picked automatically. A user's
+S/A/B/C/D rank in Settings makes them routable through a synthetic card
+([tier list](model-routing.md#tier-list)). Every model's description advertises Vision,
+but `gmodel` (GLM-5.3) and `dmodel` (DeepSeek-V4-Pro) resolve to text-only cards, so the
+router excludes them from vision tasks; the other seven rated models accept images.
+
+**Approvals.** Qoder's four session modes are its permission modes, mapped 1:1:
+Standard → `default`, Accept edits → `acceptEdits`, Plan → `plan`, Full access →
+`bypassPermissions`; a mode the CLI stops advertising fails the turn. Read, search,
+fetch and think requests are allowed in every mode. In Accept edits, edit requests that
+still ask are approved by the shared ACP path rather than Qoder's own policy; commands
+still ask you. Plan is Qoder's native `plan` mode with no prompt prefix, but that mode
+does not refuse writes itself, so PandaCode declines every state-changing request —
+this policy is the enforcement. Options are matched by `kind`, never by id (the
+standing-grant id differs between file tools and MCP/Bash); a decline selects the
+offered `reject_once` option, labelled “Reject”, and a request with no rejection option
+is cancelled. `reject_always` is never offered. Full access answers a request that
+still arrives with the offered `proceed_once`, never a standing grant. See
+[approvals](approvals.md).
+
+**Terminal console.** Opening the terminal console launches Qoder's interactive TUI,
+preserving the task's model (`--model`), reasoning effort (`--reasoning-effort`) and
+resume (`--resume <session-id>`). The TUI's permission modes are snake_case and have no
+Plan: Standard → `--permission-mode default`, Accept edits → `accept_edits`, Full
+access → `bypass_permissions`. A Plan task is refused with “Qoder's console cannot start
+in Plan mode. Use task chat instead.”
+
+**Capabilities and MCP.** Settings → Tools & add-ons inspects Qoder's MCP servers from
+`~/.qoder/settings.json` (`mcpServers`) and the project's `.mcp.json`, and its skills
+from `~/.agents/skills` and the project's `.agents/skills`, regardless of any
+connection's config folder. Library skills and rules ride in the prompt. Advertised
+slash commands arrive through `available_commands_update`, including your own plugins
+and skills.
+
+**Updates.** Checked and installed through the official npm registry (`npm:qoder`,
+package `@qoder-ai/qodercli`). Qoder also updates itself: `general.enableAutoUpdate` in
+`~/.qoder/settings.json` (boolean, default true) controls its own updater, and no
+environment variable disables it. PandaCode cannot turn it off per launch; editing that
+setting is your own act, which PandaCode does not do.
+
+**Turn data.** Streaming text, thoughts, tool calls, images (real ACP image blocks),
+cancellation and session resume use the shared ACP paths; Qoder advertises
+`session/resume`, so resume prefers it over `session/load`. Mid-turn messages are held
+for the next turn: `promptQueueing` queues a separate turn rather than steering the
+running one. Named connections accept `QODER_CONFIG_DIR` as their config folder, the
+config root that holds the sign-in; `QODER_CLI_HOME` (fallback `GEMINI_CLI_HOME`) is the
+coarser base `.qoder` hangs off, and stays an ordinary Environment variable. A
+`--config-dir` argument outranks the folder field.
+
+**Not available from Qoder's ACP server (1.1.13).** No usage is reported: every turn
+returns zero tokens and `usage_update` never arrives, so the context meter stays hidden
+and the Usage dialog says “Qoder does not expose credits or limits through this agent.
+Check your Qoder account.” Cloud-agent installation is not offered for Qoder.
+
+**PandaCode tools.** For a run that has PandaCode tools (titles, run/preview, team
+tools), Qoder advertises HTTP MCP, so they reach it through the `mcpServers` list in
+`session/new` as direct HTTP to PandaCode's loopback host
+(`http://127.0.0.1:<port>/mcp`). The run's bearer token rides in that entry's
+`Authorization` header, never in arguments or environment values; no package is
+downloaded and your own MCP settings are never written. Cline's per-run settings file
+is specific to Cline.
+
+Verified against `qodercli` 1.1.13 on 2026-11-11 by driving `qodercli --acp` directly
+(plan writes, images, cancellation, queued prompts and the PandaCode tools route); the
+config-root precedence was read from the installed bundle on 2026-11-12 without
+launching it. The recorded frames back the unit tests in `providers/qoder.rs`, and an
+ignored smoke test (`installed_qoder_lists_models_with_efforts`) reads the real catalog
+without prompting.
+
 ## Muse Code
 
 Muse Code (Meta's coding agent CLI, `muse`, installed by its launcher into
