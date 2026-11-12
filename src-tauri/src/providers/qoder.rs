@@ -14,18 +14,22 @@ pub(super) const SIGN_IN: &str =
 /// Qoder Desktop and the Agent SDK export SDK variables into the shells they spawn.
 /// Inheriting them would hand the CLI the host's SDK identity and auth payload
 /// instead of its own sign-in.
-pub(crate) const SDK_ENVIRONMENT: [&str; 4] = [
+const SDK_ENVIRONMENT: [&str; 4] = [
     "QODER_AGENT_SDK_ENTRYPOINT",
     "QODER_SDK_ACCESS_TOKEN",
     "QODER_SDK_AUTH_PAYLOAD_FILE",
     "QODER_AUTH_STDIN",
 ];
 
+pub(crate) fn scrub_sdk_environment(command: &mut impl crate::child_env::EnvTarget) {
+    for name in SDK_ENVIRONMENT {
+        command.remove_var(std::ffi::OsStr::new(name));
+    }
+}
+
 pub(crate) fn configure(command: &mut Command) {
     command.arg("--acp");
-    for name in SDK_ENVIRONMENT {
-        command.env_remove(name);
-    }
+    scrub_sdk_environment(command);
 }
 
 pub(super) fn mode_id(mode: &str) -> &'static str {
@@ -226,6 +230,27 @@ mod tests {
         }
         // A user's own config folder is not an SDK variable and must survive.
         assert!(envs.iter().any(|(key, value)| *key == "QODER_CONFIG_DIR" && value.is_some()));
+    }
+
+    #[test]
+    fn scrub_sdk_environment_removes_the_inherited_sdk_environment_from_a_console() {
+        let inherited = [
+            ("QODER_AGENT_SDK_ENTRYPOINT", "sdk"),
+            ("QODER_SDK_ACCESS_TOKEN", "secret"),
+            ("QODER_SDK_AUTH_PAYLOAD_FILE", "/tmp/payload.json"),
+            ("QODER_AUTH_STDIN", "1"),
+        ];
+        let mut cmd = portable_pty::CommandBuilder::new("test");
+        for (name, value) in inherited {
+            cmd.env(name, value);
+        }
+        cmd.env("QODER_CONFIG_DIR", "/home/user/.qoder");
+        scrub_sdk_environment(&mut cmd);
+        for (name, _) in inherited {
+            assert!(cmd.get_env(name).is_none(), "{name}");
+        }
+        // A user's own config folder is not an SDK variable and must survive.
+        assert!(cmd.get_env("QODER_CONFIG_DIR").is_some());
     }
 
     /// Recorded from `qodercli --acp` 1.1.13.

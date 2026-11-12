@@ -464,7 +464,7 @@ fn harness_command(context: &HarnessContext<'_>, root: &Path) -> Result<CommandB
     crate::provider_settings::apply_environment(context.provider, &mut cmd);
     for name in crate::providers::claude_auth::removed_environment(context.provider) { cmd.env_remove(name); }
     if context.provider == "qoder" {
-        for name in crate::providers::qoder::SDK_ENVIRONMENT { cmd.env_remove(name); }
+        crate::providers::qoder::scrub_sdk_environment(&mut cmd);
     }
     cmd.args(args);
     let existing = |key: &str| {
@@ -1957,6 +1957,22 @@ mod console_arguments_tests {
         ] {
             let args = harness_arguments(&HarnessContext { mode, ..context }).unwrap();
             assert_eq!(args, ["--permission-mode", permission], "{mode}");
+        }
+    }
+
+    #[test]
+    fn qoder_console_skips_the_default_and_empty_model() {
+        let context = HarnessContext {
+            session_id: "task",
+            provider: "qoder",
+            resume_id: None,
+            model: None,
+            reasoning_effort: None,
+            mode: "ask",
+        };
+        for model in ["default", ""] {
+            let args = harness_arguments(&HarnessContext { model: Some(model), ..context }).unwrap();
+            assert_eq!(args, ["--permission-mode", "default"], "{model}");
         }
     }
 
