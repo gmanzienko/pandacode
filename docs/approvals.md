@@ -101,13 +101,14 @@ This is an ACP tool policy, not a filesystem or network sandbox.
 Qoder's four ACP session modes are its permission modes, so each PandaCode choice maps
 1:1: Standard is `default`, Accept edits `acceptEdits`, Plan `plan`, and Full access
 `bypassPermissions`; a mode it stops advertising fails the turn. Read, search, fetch and
-think requests are allowed in every mode. Accept edits approves edit requests that still
-ask through the shared ACP path; commands still ask you. Plan is Qoder's native `plan`
-mode, which does not refuse writes itself, so PandaCode declines every state-changing
-request — this policy is the enforcement. Options are matched by `kind`, never by id; a
-decline selects the offered `reject_once` option (labelled “Reject”), and a request with
-no rejection option is cancelled. Full access answers a request that still arrives with
-the offered `proceed_once`, never a standing grant.
+think requests are allowed in every mode. Standard asks before edits, commands and other
+tools. Accept edits approves edit requests that still ask through the shared ACP path;
+commands still ask you. Plan is Qoder's native `plan` mode, which does not refuse writes
+itself, so PandaCode declines every state-changing request — this policy is the
+enforcement. Options are matched by `kind`, never by id; a decline selects the offered
+`reject_once` option (labelled “Reject”), and a request with no rejection option is
+cancelled. Full access answers a request that still arrives with the offered
+`proceed_once`, never a standing grant.
 
 Muse Code selects its approval mode on the wire and its sandbox with process flags:
 Standard is `promptUnmatched`, Accept edits `onRequest`, Plan `denyUnmatched` with

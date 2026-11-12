@@ -1141,7 +1141,7 @@ browser login itself. Qoder Desktop and the Agent SDK export SDK variables into 
 shells they spawn; PandaCode removes `QODER_AGENT_SDK_ENTRYPOINT`,
 `QODER_SDK_ACCESS_TOKEN`, `QODER_SDK_AUTH_PAYLOAD_FILE` and `QODER_AUTH_STDIN` from
 every task, discovery and console launch, so the CLI uses its own sign-in instead of
-the host's SDK identity and auth payload.
+the spawning app's SDK identity and auth payload.
 
 **Models and effort.** `session/new` advertises fifteen models with opaque ids
 (`auto`, `ultimate`, `efficient`, `smodel`, …) beside their display names. Discovery
@@ -1194,8 +1194,8 @@ and skills.
 **Updates.** Checked and installed through the official npm registry (`npm:qoder`,
 package `@qoder-ai/qodercli`). Qoder also updates itself: `general.enableAutoUpdate` in
 `~/.qoder/settings.json` (boolean, default true) controls its own updater, and no
-environment variable disables it. PandaCode cannot turn it off per launch; editing that
-setting is your own act, which PandaCode does not do.
+environment variable disables it. PandaCode cannot turn it off per launch and does not
+edit that setting; turn it off yourself.
 
 **Turn data.** Streaming text, thoughts, tool calls, images (real ACP image blocks),
 cancellation and session resume use the shared ACP paths; Qoder advertises
@@ -1216,8 +1216,7 @@ tools), Qoder advertises HTTP MCP, so they reach it through the `mcpServers` lis
 `session/new` as direct HTTP to PandaCode's loopback host
 (`http://127.0.0.1:<port>/mcp`). The run's bearer token rides in that entry's
 `Authorization` header, never in arguments or environment values; no package is
-downloaded and your own MCP settings are never written. Cline's per-run settings file
-is specific to Cline.
+downloaded and your own MCP settings are never written.
 
 Verified against `qodercli` 1.1.13 on 2026-11-11 by driving `qodercli --acp` directly
 (plan writes, images, cancellation, queued prompts and the PandaCode tools route); the
