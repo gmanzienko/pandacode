@@ -922,12 +922,16 @@ env = { API_KEY = "secret" }
         assert_eq!(servers.len(), 2);
         assert!(servers.iter().any(|item| item.name == "local-tool" && item.source == "~/.qoder/settings.json"));
         assert!(servers.iter().any(|item| item.name == "project-tool" && item.source == "Project .mcp.json"));
-        assert!(entries
+        let mut skills: Vec<_> = entries
             .iter()
-            .any(|item| item.harness == "qoder" && item.kind == "skill" && item.name == "code-review"));
-        assert!(entries
-            .iter()
-            .any(|item| item.harness == "qoder" && item.kind == "skill" && item.name == "doc-gen"));
+            .filter(|item| item.harness == "qoder" && item.kind == "skill")
+            .map(|item| (item.name.as_str(), item.source.as_str()))
+            .collect();
+        skills.sort_unstable();
+        assert_eq!(
+            skills,
+            [("code-review", "~/.agents/skills"), ("doc-gen", ".agents/skills")]
+        );
         fs::remove_dir_all(home).unwrap();
         fs::remove_dir_all(project).unwrap();
     }
