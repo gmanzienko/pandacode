@@ -303,6 +303,7 @@ pub(crate) fn skill_roots(
             | "github-copilot"
             | "antigravity"
             | "muse"
+            | "qoder"
     ) {
         roots.push((home.join(".agents/skills"), "~/.agents/skills"));
     }
@@ -317,6 +318,7 @@ pub(crate) fn skill_roots(
             | "github-copilot"
             | "antigravity"
             | "muse"
+            | "qoder"
     ) {
         if let Some(project) = project {
             roots.push((project.join(".agents/skills"), ".agents/skills"));

@@ -147,7 +147,7 @@ pub(super) fn agent_id(harness: &str) -> Option<&'static str> {
     Some(match harness {
         "claude" | "glm" | "mimo" | "alibaba" => "claude-code",
         "codex" => "codex",
-        "deepseek" | "muse" => "universal",
+        "deepseek" | "muse" | "qoder" => "universal",
         "kimi" => "kimi-code-cli",
         "opencode" => "opencode",
         "antigravity" => "antigravity",
