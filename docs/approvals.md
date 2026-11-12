@@ -106,7 +106,7 @@ tools. Accept edits approves edit requests that still ask through the shared ACP
 commands still ask you. Plan is Qoder's native `plan` mode, which does not refuse writes
 itself, so PandaCode declines every state-changing request — this policy is the
 enforcement. Options are matched by `kind`, never by id; a decline selects the offered
-`reject_once` option (labelled “Reject”), and a request with no rejection option is
+`reject_once` option (labelled "Reject"), and a request with no rejection option is
 cancelled. Full access answers a request that still arrives with the offered
 `proceed_once`, never a standing grant.
 
