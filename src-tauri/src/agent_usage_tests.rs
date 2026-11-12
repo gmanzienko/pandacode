@@ -687,6 +687,7 @@ async fn claude_code_rewriting_its_files_for_the_same_owner_keeps_the_reading() 
         let usage = query_usage("qoder".into(), true).await.unwrap();
         assert_eq!(usage.provider, "qoder");
         assert_eq!(usage.status, "unsupported");
+        assert_eq!(usage.message.as_deref(), Some("Qoder does not expose credits or limits through this agent. Check your Qoder account."));
         assert!(usage.windows.is_empty());
         assert!(query_usage("nope".into(), true).await.is_err());
     }
