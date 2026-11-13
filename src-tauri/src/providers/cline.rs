@@ -689,7 +689,7 @@ mod tests {
 
     #[test]
     fn the_token_reaches_cline_only_through_the_settings_file() {
-        crate::secret_store::setup(&std::env::temp_dir().join(format!("cline-mcp-setup-{}", uuid::Uuid::new_v4())));
+        crate::secret_store::test_dir();
         let token = "Bearer token-7741";
         let server = json!({"type":"http","name":"pandacode_architect","url":"http://127.0.0.1:4310/mcp","headers":[{"name":"Authorization","value":token}]});
         let mut command = Command::new("cline");
