@@ -146,7 +146,12 @@ test('MCP: input key/values and JSON records as reference rows with +N more', ()
   assert.match(html, /<dt>team<\/dt><dd>ENG<\/dd>/);
   assert.equal(count(html, 'class="tc-row"'), 6);
   assert.match(html, /\+3 more/);
-  assert.match(html, /tc-row-time">Oct 28</);
+  // The row time is the record's own date rendered in the machine's locale and time zone: the fixture's
+  // 08:12Z is the 28th in UTC but can be the 27th locally, and month names are not English everywhere.
+  const rowTimes = html.match(/<span class="tc-row-time">[^<]*<\/span>/g) ?? [];
+  const expectedTime = `<span class="tc-row-time">${new Date('2024-10-28T08:12:00Z').toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>`;
+  assert.equal(rowTimes.length, 6);
+  assert.deepEqual([...new Set(rowTimes)], [expectedTime]);
   assert.match(html, /Body 0/);
   assert.match(richCard(tool('mcp__x__get', {}, { a: 1, nested: { b: 2 } })), /<dt>nested<\/dt><dd>1 field<\/dd>/);
   // Docs-style results with only a title and a link use the link as the meta.
