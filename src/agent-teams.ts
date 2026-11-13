@@ -88,10 +88,10 @@ export function mountAgentTeams(host: HTMLElement, options: AgentTeamsOptions): 
     models.innerHTML = groups.map(provider => `<section aria-label="${escape(harnessName(provider))}"><h4>${providerLogo(provider)}${escape(harnessName(provider))}</h4>${all.filter(model => model.provider === provider).map(model => {
       const key = modelKey(model), label = `${model.name} · ${model.harness}`;
       const effort = model.efforts?.length ? `<select class="agent-team-effort" aria-label="Worker effort for ${escape(label)}">${effortOptions(model, saved.find(worker => modelKey(worker) === key)?.reasoningEffort)}</select>` : '';
-      // Speed choices are exactly the tiers this model's catalog lists; a saved tier it no longer
-      // lists is dropped here, and the row says so.
-      const kept = keepSpeed(saved.find(worker => modelKey(worker) === key)?.serviceTier, model.speedTiers ?? [], model.name);
-      const options = speedOptions(model.speedTiers ?? [], kept.tier);
+      // Only Codex workers support speed tiers; a stale saved tier is dropped and the row says so.
+      const tiers = model.provider === 'codex' ? model.speedTiers ?? [] : [];
+      const kept = keepSpeed(saved.find(worker => modelKey(worker) === key)?.serviceTier, tiers, model.name);
+      const options = speedOptions(tiers, kept.tier);
       const speed = options ? `<select class="agent-team-effort agent-team-speed" aria-label="Worker speed for ${escape(label)}">${options}</select>` : '';
       const note = kept.note ? `<small class="agent-team-speed-note" data-live>${escape(kept.note)}</small>` : '';
       return `<div class="agent-team-model" data-key="${escape(key)}" data-search="${escape(`${label} ${model.model}`.toLowerCase())}"><label><input type="checkbox" value="${escape(key)}" aria-label="Include ${escape(label)}" ${chosen.has(key) ? 'checked' : ''}><span>${escape(model.name)}</span></label><label class="agent-team-lead"><input type="radio" name="agent-team-lead" value="${escape(key)}" aria-label="${escape(label)} leads" ${key === lead ? 'checked' : ''}><span>Lead</span></label>${effort}${speed}${note}</div>`;

@@ -200,6 +200,7 @@ export function mountArchitectSetup(host: HTMLElement, options: SetupOptions): S
         speed.innerHTML = speedOptions(tiers, kept.tier); speed.hidden = !speed.innerHTML;
         note.textContent = kept.note; note.hidden = !kept.note; before = tiers;
       };
+      if (config.workers[index].provider !== 'codex') syncSpeed();
       speed.addEventListener('change', () => { if (speed.value) config.workers[index].serviceTier = speed.value; else delete config.workers[index].serviceTier; note.hidden = true; savedProfiles.changed(); });
       row.querySelector<HTMLButtonElement>('.architect-model')!.addEventListener('click', event => choose(event.currentTarget as HTMLButtonElement, config.workers[index], true, syncSpeed));
     });

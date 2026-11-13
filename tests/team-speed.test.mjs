@@ -16,7 +16,7 @@ const providers = [
     { id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol', description: '' },
     { id: 'nova-9', name: 'Nova 9', description: '', speedTiers: [TURBO] },
   ] },
-  { id: 'claude', models: [{ id: 'opus', name: 'Opus', description: '' }] },
+  { id: 'claude', models: [{ id: 'opus', name: 'Opus', description: '', speedTiers: [tier('fast', 'Fast', 'fast', 'Claude fast mode')] }] },
 ];
 const labels = html => [...html.matchAll(/<option value="([^"]*)"[^>]*>([^<]*)<\/option>/g)].map(m => [m[1], m[2]]);
 
@@ -69,4 +69,14 @@ test('a named team saves the chosen tier key for Codex workers only, as native w
   const { config } = namedTeamSetup('Quick', lead, [lead, claude]);
   assert.equal(config.workers[0].serviceTier, 'turbo-max');
   assert.equal('serviceTier' in config.workers[1], false);
+});
+
+
+test('team speed clears a stale Claude tier even when its per-task catalog advertises Fast', () => {
+  const catalog = structuredClone(providers);
+  const tiers = modelSpeedTiers(providers, 'claude', 'opus');
+  assert.deepEqual(tiers, []);
+  assert.deepEqual(keepSpeed('fast', tiers, 'opus'), { tier: null, note: 'Fast is not available for opus; this worker will use the default speed only if you save it that way.' });
+  assert.deepEqual(providers, catalog);
+  assert.equal(providers[1].models[0].speedTiers[0].key, 'fast');
 });

@@ -19,7 +19,13 @@ async function install(page: Page): Promise<void> {
     expect(source).toMatch(marker);
     await route.fulfill({ response, body: source.replace(marker, `async function invoke(command, args) {
       (window.__agentTeams ??= { calls: [] }).calls.push({ command, args: structuredClone(args) });
-      if (command === 'list_provider_models') await window.__agentTeams.modelGate;
+      if (command === 'list_provider_models') {
+        await window.__agentTeams.modelGate;
+        const result = await invokePreview(command, args);
+        (window.__agentTeams.loadedModels ??= []).push(args.provider);
+        return result;
+      }
+      if (command === 'architect_profiles' && window.__agentTeams.library) return structuredClone(window.__agentTeams.library);
       if (command === 'architect_configure') {
         await window.__agentTeams.configureGate;
         if (window.__agentTeams.configureError) throw new Error(window.__agentTeams.configureError);
@@ -423,6 +429,11 @@ test('Codex workers choose only speed tiers their model\'s catalog lists, in age
   await pick('codex', 'gpt-6-astra');
   await expect(workerSpeed).toBeVisible();
   await workerSpeed.selectOption('fast');
+  await pick('claude', 'opus');
+  await expect(workerSpeed).toBeHidden();
+  await expect(note).toHaveText('Fast is not available for opus; this worker will use the default speed only if you save it that way.');
+  await pick('codex', 'gpt-6-astra');
+  await workerSpeed.selectOption('fast');
   await pick('deepseek', 'deepseek-v4-pro');
   await expect(workerSpeed).toBeHidden();
   await expect(note).toHaveText('Fast is not available for deepseek-v4-pro; this worker will use the default speed only if you save it that way.');
@@ -453,4 +464,72 @@ test('saving a named team refuses a speed tier its model\'s catalog does not lis
     try { await invoke('architect_save_profile', { id: null, name: 'Slow', setup }); return ''; } catch (cause) { return String(cause); }
   });
   expect(error).toContain('Luna: Ultrafast is not available for gpt-6-luna in the installed Codex catalog.');
+});
+
+
+test('Claude Fast stays per-task while named teams hide it and clear stale saved tiers', async ({ page }) => {
+  await install(page);
+  const catalog = await page.evaluate(() => (window as any).__teamInvoke('list_provider_models', { provider: 'claude' }));
+  expect(catalog.find((model: any) => model.id === 'opus').speedTiers).toEqual([expect.objectContaining({ key: 'fast', name: 'Fast' })]);
+  await modelButton(page).click();
+  await picker(page).getByRole('tab', { name: 'Claude Code', exact: true }).click();
+  await picker(page).locator('.model-menu-option[data-provider="claude"][data-model="opus"]').click();
+  await modelButton(page).click();
+  await expect(picker(page).getByRole('radiogroup', { name: 'Speed', exact: true }).getByRole('radio', { name: 'Fast', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await openAgents(page);
+  await settings(page).getByRole('button', { name: 'New team' }).click();
+  await settings(page).getByRole('textbox', { name: 'Team name', exact: true }).fill('Claude team');
+  const row = settings(page).locator('.agent-team-model[data-key="claude:opus"]');
+  await row.getByRole('checkbox').check();
+  await expect(row.locator('.agent-team-speed')).toHaveCount(0);
+  await settings(page).getByRole('button', { name: 'Save team', exact: true }).click();
+  await expect(settings(page).getByRole('button', { name: 'Edit Claude team', exact: true })).toBeVisible();
+  expect((await calls(page, 'architect_save_profile')).at(-1).args.setup.config.workers).toEqual([expect.objectContaining({ provider: 'claude', model: 'opus' })]);
+  expect((await calls(page, 'architect_save_profile')).at(-1).args.setup.config.workers[0]).not.toHaveProperty('serviceTier');
+  await closeSettings(page);
+  await page.evaluate(async () => {
+    const state = (window as any).__agentTeams;
+    state.library = await (window as any).__teamInvoke('architect_profiles');
+    state.library.profiles.at(-1).setup.config.workers[0].serviceTier = 'fast';
+  });
+  await openAgents(page);
+  await settings(page).getByRole('button', { name: 'Edit Claude team', exact: true }).click();
+  await expect(row.locator('.agent-team-speed')).toHaveCount(0);
+  await expect(row.locator('.agent-team-speed-note')).toHaveText('Fast is not available for Claude Opus 5; this worker will use the default speed only if you save it that way.');
+  await settings(page).getByRole('button', { name: 'Save team', exact: true }).click();
+  await expect(settings(page).getByRole('form', { name: 'Agent team', exact: true })).toBeHidden();
+  expect((await calls(page, 'architect_save_profile')).at(-1).args.setup.config.workers[0]).not.toHaveProperty('serviceTier');
+});
+
+test('classic teams clear loaded Claude Fast and save default speed despite its Fast catalog', async ({ page }) => {
+  await install(page);
+  await page.evaluate(async () => {
+    const library = await (window as any).__teamInvoke('architect_profiles');
+    library.lastSetup = { architect: { provider: 'claude', model: 'opus' }, config: { workers: [{ id: 'claude', name: 'Claude', provider: 'claude', model: 'opus', serviceTier: 'fast' }], maxParallel: 1, maxRounds: 8, maxAssignments: 24, workspace: 'shared', summaryLimit: 3072 } };
+    library.profiles.push({ id: 'stale-claude', name: 'Stale Claude', setup: structuredClone(library.lastSetup) });
+    (window as any).__agentTeams.library = library;
+  });
+  await openAgents(page);
+  await settings(page).getByRole('checkbox', { name: 'Classic team setup', exact: true }).check();
+  await closeSettings(page);
+  await page.getByRole('button', { name: 'Architect & workers', exact: true }).click();
+  const setup = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'Architect & workers', exact: true }) });
+  await expect(setup.locator('.architect-speed')).toHaveCount(1);
+  await expect(setup.locator('.architect-speed')).toBeHidden();
+  await expect(setup.locator('.architect-speed-note')).toHaveText('Fast is not available for opus; this worker will use the default speed only if you save it that way.');
+  // Reselect only after every live model request has returned, so no later catalog refresh can repair the form.
+  await expect.poll(() => page.evaluate(() => {
+    const state = (window as any).__agentTeams;
+    return state.loadedModels?.length > 0 && state.loadedModels.length === state.calls.filter((call: any) => call.command === 'list_provider_models').length;
+  })).toBe(true);
+  await setup.getByRole('button', { name: 'Choose team profile', exact: true }).click();
+  await page.getByRole('menuitemradio', { name: 'Stale Claude', exact: true }).click();
+  await expect(setup.locator('.architect-speed')).toBeHidden();
+  await expect(setup.locator('.architect-speed-note')).toHaveText('Fast is not available for opus; this worker will use the default speed only if you save it that way.');
+  await setup.getByRole('button', { name: 'Save setup', exact: true }).click();
+  await expect(setup).toHaveCount(0);
+  const worker = (await calls(page, 'architect_configure')).at(-1).args.config.workers[0];
+  expect(worker).toMatchObject({ provider: 'claude', model: 'opus' });
+  expect(worker).not.toHaveProperty('serviceTier');
 });

@@ -19,8 +19,9 @@ export function setClassicTeamSetup(on: boolean): void {
 
 export type TeamModel = { provider: ProviderId; harness: string; model: string; name: string; reasoningEffort?: string | null; efforts?: ProviderModel['reasoningEfforts']; serviceTier?: string | null; speedTiers?: readonly SpeedTier[] };
 
-/** The speed tiers a model's catalog lists, as native reported them (`default` is the harness's default model). */
+/** Team workers support speed tiers only for Codex (`default` is the harness's default model). */
 export function modelSpeedTiers(providers: readonly { id: ProviderId; models: readonly ProviderModel[] }[], provider: ProviderId, model: string): readonly SpeedTier[] {
+  if (provider !== 'codex') return [];
   return providers.find(entry => entry.id === provider)?.models.find(entry => entry.id === (model || 'default'))?.speedTiers ?? [];
 }
 const attr = (text: string) => text.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
