@@ -4924,7 +4924,7 @@ fn reasoning_effort_overrides_any_worker_pick() {
     {
         let store = state.store.lock().unwrap();
         let mut team = load(&store, &sid).unwrap().unwrap();
-        team.config.workers.push(WorkerProfile { id: "pi".into(), name: "Pi".into(), provider: "pi".into(), model: "p".into(), reasoning_effort: Some("low".into()) });
+        team.config.workers.push(WorkerProfile { id: "pi".into(), name: "Pi".into(), provider: "pi".into(), model: "p".into(), reasoning_effort: Some("low".into()), service_tier: None });
         save(&store, &mut team).unwrap();
     }
     let result = call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[
@@ -4998,7 +4998,7 @@ fn dispatch_fits_effort_to_the_model_and_normalises_it() {
     {
         let store = state.store.lock().unwrap();
         let mut team = load(&store, &sid).unwrap().unwrap();
-        team.config.workers.push(WorkerProfile { id: "cx".into(), name: "Cx".into(), provider: "codex".into(), model: "fit-test-dispatch".into(), reasoning_effort: None });
+        team.config.workers.push(WorkerProfile { id: "cx".into(), name: "Cx".into(), provider: "codex".into(), model: "fit-test-dispatch".into(), reasoning_effort: None, service_tier: None });
         save(&store, &mut team).unwrap();
     }
     let dispatch = |extra: Value| call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[auto_assignment(&format!("k{}", extra.to_string().len()), extra)]}));
@@ -5037,7 +5037,7 @@ fn a_lead_at_max_and_a_roster_profile_at_xhigh_keep_their_effort() {
         let store = state.store.lock().unwrap();
         store.db.execute("UPDATE sessions SET reasoning_effort='max' WHERE id=?1", [&sid]).unwrap();
         let mut team = load(&store, &sid).unwrap().unwrap();
-        team.config.workers.push(WorkerProfile { id: "rx".into(), name: "Rx".into(), provider: "codex".into(), model: "rx-model".into(), reasoning_effort: Some("xhigh".into()) });
+        team.config.workers.push(WorkerProfile { id: "rx".into(), name: "Rx".into(), provider: "codex".into(), model: "rx-model".into(), reasoning_effort: Some("xhigh".into()), service_tier: None });
         save(&store, &mut team).unwrap();
     }
     call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[auto_assignment("own", json!({})), auto_assignment("rx", json!({"profileId":"rx"}))]})).unwrap();
@@ -5173,7 +5173,7 @@ fn a_completed_worker_keeps_its_effort_note_and_no_error() {
     {
         let store = state.store.lock().unwrap();
         let mut team = load(&store, &sid).unwrap().unwrap();
-        team.config.workers.push(WorkerProfile { id: "nm".into(), name: "Nm".into(), provider: "codex".into(), model: "note-model".into(), reasoning_effort: None });
+        team.config.workers.push(WorkerProfile { id: "nm".into(), name: "Nm".into(), provider: "codex".into(), model: "note-model".into(), reasoning_effort: None, service_tier: None });
         save(&store, &mut team).unwrap();
     }
     call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[auto_assignment("nm", json!({"profileId":"nm","reasoningEffort":"max"}))]})).unwrap();
@@ -5411,7 +5411,7 @@ fn effort_notes_accumulate_before_launch_and_a_plain_follow_up_clears_them() {
     {
         let store = state.store.lock().unwrap();
         let mut team = load(&store, &sid).unwrap().unwrap();
-        team.config.workers.push(WorkerProfile { id: "nt".into(), name: "Nt".into(), provider: "codex".into(), model: "notes-model".into(), reasoning_effort: None });
+        team.config.workers.push(WorkerProfile { id: "nt".into(), name: "Nt".into(), provider: "codex".into(), model: "notes-model".into(), reasoning_effort: None, service_tier: None });
         save(&store, &mut team).unwrap();
     }
     let ids = call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[auto_assignment("nt", json!({"profileId":"nt","reasoningEffort":"max"}))]})).unwrap();
@@ -5696,7 +5696,7 @@ fn failover_without_a_requested_effort_takes_the_new_models_default() {
         let mut team = load(&store, &sid).unwrap().unwrap();
         team.config.catalog = ["codex", "cline"].iter().map(|p| profile(&format!("{p}-m"), p, model, model)).collect();
         // The first harness's roster profile carries its own default; the lead asks for none.
-        team.config.workers.push(WorkerProfile { id: "cxd".into(), name: "Cxd".into(), provider: "codex".into(), model: model.into(), reasoning_effort: Some("xhigh".into()) });
+        team.config.workers.push(WorkerProfile { id: "cxd".into(), name: "Cxd".into(), provider: "codex".into(), model: model.into(), reasoning_effort: Some("xhigh".into()), service_tier: None });
         save(&store, &mut team).unwrap();
     }
     call(&state, &sid, "pandacode_dispatch_workers", json!({"assignments":[auto_assignment("fd", json!({"profileId":"cxd"}))]})).unwrap();

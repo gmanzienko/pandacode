@@ -288,7 +288,7 @@ pub(super) async fn set_task_preference(
         }
         TaskPreference::Fast { enabled } => {
             let tier = if enabled {
-                json!(command_operations::service_tier(&cwd, &task.model, "fast").await?)
+                json!(command_operations::fast_service_tier(&cwd, &task.model).await?)
             } else {
                 Value::Null
             };

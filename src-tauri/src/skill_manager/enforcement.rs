@@ -728,7 +728,7 @@ mod behavior_tests {
         assert_eq!(console_arguments("codex", &names), codex_arguments(&names));
         for provider in ["codex", "opencode"] {
             let mut config = crate::providers::RunConfig {
-                session_id: "skill-enforcement".into(),
+                required_tier: None, session_id: "skill-enforcement".into(),
                 provider: provider.into(),
                 model: "default".into(),
                 reasoning_effort: None,

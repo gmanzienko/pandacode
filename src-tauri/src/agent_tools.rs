@@ -1239,7 +1239,7 @@ for await (const line of createInterface({input: process.stdin})) {
                         send.send(RunInput::Approval { request_id: event.request_id.unwrap(), approved }).unwrap();
                     }
                 });
-                let config = RunConfig { session_id: uuid::Uuid::new_v4().to_string(), provider: provider.into(), mode: mode.into(),
+                let config = RunConfig { required_tier: None, session_id: uuid::Uuid::new_v4().to_string(), provider: provider.into(), mode: mode.into(),
                     model: "default".into(), reasoning_effort: None, cwd: root.clone(), resume_id: None, prompt: "Check tools".into(),
                     instructions: String::new(), skill: None, goal: None, codex_settings: None, images: vec![] };
                 tokio::time::timeout(Duration::from_secs(20), crate::providers::run_with_tools(config, sink, receive, Some(host), Default::default()))

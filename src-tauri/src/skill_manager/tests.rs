@@ -204,7 +204,7 @@ fn soft_instructions_are_idempotent_on_resumes_and_claude_uses_only_tools() {
     let disabled = BTreeSet::from(["alpha".into(), "beta".into()]);
     for provider in ["codex", "kimi", "pi", "claude", "glm", "mimo"] {
         let mut config = crate::providers::RunConfig {
-            session_id: "fixture".into(),
+            required_tier: None, session_id: "fixture".into(),
             provider: provider.into(),
             model: "default".into(),
             reasoning_effort: None,

@@ -99,7 +99,7 @@ const PREVIEW_TRUNCATED: &str = "\n[Preview truncated]";
 fn should_shrink(len: usize, capacity: usize) -> bool {
     capacity > 1024 * 1024 && len <= FRAME_KEEP / 2
 }
-pub(crate) const PROVIDERS: [(&str, &str); 20] = [
+pub(crate) const PROVIDERS: [(&str, &str); 21] = [
     ("claude", "Claude Code"),
     ("codex", "Codex"),
     ("kimi", "Kimi Code"),
@@ -652,8 +652,8 @@ pub struct ModelInfo {
     pub reasoning_efforts: Vec<ReasoningEffortInfo>,
     pub default_reasoning_effort: Option<String>,
     pub context_window: Option<u64>,
-    /// Codex only: every speed tier its catalog lists (key, name and description as the catalog
-    /// gives them), offered to teams as `<model>@<key>` variants and in the Speed choices.
+    /// Catalog speed tiers (key, name and description); Codex teams also offer them as
+    /// `<model>@<key>` variants. Claude fast mode remains available in the picker.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub speed_tiers: Vec<crate::command_operations::ServiceTier>,
 }
