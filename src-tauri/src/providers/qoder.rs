@@ -210,7 +210,7 @@ pub(super) fn catalog(session: &Value, efforts: &HashMap<String, Value>) -> Vec<
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     #[test]
@@ -561,7 +561,7 @@ else send({{id:r.id,result:{{}}}});
 
     /// Recorded `session/new` result from `qodercli --acp` 1.1.13; session ID
     /// anonymized. The CLI's current model is `auto`, which has no effort option.
-    fn session_new() -> Value {
+    pub(in crate::providers) fn session_new() -> Value {
         json!({"sessionId":"ses_qoder_test",
             "modes":{"availableModes":[
                 {"id":"default","name":"Default","description":"Prompts for approval"},
@@ -614,7 +614,7 @@ else send({{id:r.id,result:{{}}}});
     /// byte-for-byte with `model.currentValue` set to the switched model, then
     /// appends the recorded `reasoning_effort` option pasted below; `auto` and
     /// `efficient` replied without one.
-    fn efforts() -> HashMap<String, Value> {
+    pub(in crate::providers) fn efforts() -> HashMap<String, Value> {
         let base = session_new()["configOptions"].as_array().unwrap().clone();
         let mut efforts = HashMap::new();
         for (model, option) in [

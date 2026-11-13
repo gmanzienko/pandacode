@@ -115,11 +115,15 @@ pub(crate) fn store(discovery: Option<Discovery>, metadata: &Value) {
     let Some(discovery) = discovery else {
         return;
     };
+    // Qoder's per-model efforts require its full probe, not command metadata.
+    if discovery.key.provider == "qoder" {
+        return;
+    }
     let models = acp::parse_models_for(&discovery.key.provider, metadata);
     store_models(Some(discovery), models);
 }
 
-/// For harnesses whose catalog takes more than one `session/new` result (Devin).
+/// For harnesses whose catalog needs per-model probes (Devin and Qoder).
 pub(crate) fn store_models(discovery: Option<Discovery>, models: Vec<ModelInfo>) {
     let Some(discovery) = discovery else {
         return;
@@ -209,7 +213,7 @@ mod tests {
             {"id":"reasoning_effort","category":"thought_level","type":"select","currentValue":"high","options":[
                 {"value":"off"},{"value":"low"},{"value":"high"},{"value":"max"}]}]});
         // Both model discovery and command discovery populate this cache.
-        for provider in ["deepseek", "kilo", "qoder"] {
+        for provider in ["deepseek", "kilo"] {
             store(begin(provider, &path), &metadata);
             let models = get(provider, &path).unwrap();
             assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["default", api, account, pro]);
@@ -228,6 +232,46 @@ mod tests {
         without_effort["configOptions"].as_array_mut().unwrap().pop();
         store(begin("deepseek", &path), &without_effort);
         assert!(get("deepseek", &path).unwrap().iter().all(|m| m.reasoning_efforts.is_empty() && m.default_reasoning_effort.is_none()));
+        cache().lock().unwrap().0.retain(|key, _| key.path != path);
+    }
+
+    #[test]
+    fn qoder_command_metadata_cannot_seed_a_partial_catalog() {
+        let _guard = GLOBAL_CACHE_TEST.lock().unwrap();
+        let path = std::env::temp_dir().join(format!("qoder-cold-catalog-{}", uuid::Uuid::new_v4()));
+        store(begin("qoder", &path), &super::super::qoder::tests::session_new());
+        assert!(get("qoder", &path).is_none());
+    }
+
+    #[test]
+    fn qoder_command_metadata_preserves_full_catalog_and_refresh() {
+        let _guard = GLOBAL_CACHE_TEST.lock().unwrap();
+        let path = std::env::temp_dir().join(format!("qoder-full-catalog-{}", uuid::Uuid::new_v4()));
+        let metadata = super::super::qoder::tests::session_new();
+        let efforts = super::super::qoder::tests::efforts();
+        let full = super::super::qoder::catalog(&metadata, &efforts);
+        assert_eq!(full.len(), 16);
+        assert_eq!(full.iter().filter(|model| !model.reasoning_efforts.is_empty()).count(), 13);
+        store_models(begin("qoder", &path), full.clone());
+        store(begin("qoder", &path), &metadata);
+        assert_eq!(get("qoder", &path).unwrap(), full);
+
+        let stale = begin("qoder", &path);
+        invalidate("qoder");
+        store_models(stale, full.clone());
+        assert!(get("qoder", &path).is_none());
+        store(begin("qoder", &path), &metadata);
+        assert!(get("qoder", &path).is_none());
+
+        // A fresh full probe may change per-model defaults after Refresh.
+        let mut refreshed_efforts = efforts;
+        let options = refreshed_efforts.get_mut("ultimate").unwrap()["configOptions"].as_array_mut().unwrap();
+        options.iter_mut().find(|option| option["id"] == "reasoning_effort").unwrap()["currentValue"] = json!("low");
+        let refreshed = super::super::qoder::catalog(&metadata, &refreshed_efforts);
+        assert_ne!(refreshed, full);
+        store_models(begin("qoder", &path), refreshed.clone());
+        store(begin("qoder", &path), &metadata);
+        assert_eq!(get("qoder", &path).unwrap(), refreshed);
         cache().lock().unwrap().0.retain(|key, _| key.path != path);
     }
 
