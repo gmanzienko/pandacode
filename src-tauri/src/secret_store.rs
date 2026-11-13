@@ -26,6 +26,44 @@ pub(crate) fn dir() -> Option<&'static Path> {
     DIR.get().map(PathBuf::as_path)
 }
 
+/// One private fixture for all ordinary tests using the process-wide secret-store dir.
+/// Kept until process exit because callers and their cleanup threads share this path.
+#[cfg(test)]
+pub(crate) fn test_dir() -> &'static Path {
+    DIR.get_or_init(|| {
+        let temp = std::env::temp_dir();
+        let name = format!("pandacode-vps-key-tests-{}-{}", std::process::id(), uuid::Uuid::new_v4());
+        let dir = temp.join(&name);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        }
+        #[cfg(not(unix))]
+        std::fs::create_dir(&dir).unwrap();
+        let resolved = dir.canonicalize().unwrap();
+        assert_eq!(resolved.parent(), Some(temp.canonicalize().unwrap().as_path()));
+        assert_eq!(resolved.file_name().unwrap(), name.as_str());
+        #[cfg(windows)]
+        {
+            let identity = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command",
+                    "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value"])
+                .output().expect("read the current Windows user SID");
+            assert!(identity.status.success(), "could not read the current Windows user SID");
+            let sid = String::from_utf8(identity.stdout).unwrap();
+            let sid = sid.trim();
+            assert!(sid.starts_with("S-1-") && sid[4..].chars().all(|c| c.is_ascii_digit() || c == '-'));
+            // Grant first so removing inherited temp-directory access cannot lock us out.
+            for args in [vec!["/grant:r".to_string(), format!("*{sid}:(OI)(CI)F")], vec!["/inheritance:r".to_string()]] {
+                let out = std::process::Command::new("icacls.exe").arg(&resolved).args(args).output().expect("set fixture ACL");
+                assert!(out.status.success(), "fixture ACL failed: {}", String::from_utf8_lossy(&out.stderr));
+            }
+        }
+        dir
+    }).as_path()
+}
+
 fn key(service: &str, account: &str) -> String {
     format!("{service}/{account}")
 }
@@ -337,6 +375,23 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pandacode-secrets-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn parallel_test_callers_share_the_actual_store_dir() {
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8).map(|_| scope.spawn(|| {
+                barrier.wait();
+                let path = test_dir();
+                assert_eq!(dir(), Some(path));
+                assert!(path.is_dir());
+                path
+            })).collect();
+            for handle in handles {
+                assert_eq!(handle.join().unwrap(), test_dir());
+            }
+        });
     }
 
     /// A fake Keychain counting each call.

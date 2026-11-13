@@ -407,35 +407,8 @@ mod tests {
     static KEY_TESTS: Mutex<()> = Mutex::new(());
 
     fn shared_store_dir() {
-        static DIR: OnceLock<PathBuf> = OnceLock::new();
-        let dir = DIR.get_or_init(|| {
-            let temp = std::env::temp_dir();
-            let name = format!("pandacode-vps-key-tests-{}-{}", std::process::id(), uuid::Uuid::new_v4());
-            let dir = temp.join(&name);
-            std::fs::create_dir(&dir).unwrap();
-            let resolved = dir.canonicalize().unwrap();
-            assert_eq!(resolved.parent(), Some(temp.canonicalize().unwrap().as_path()));
-            assert_eq!(resolved.file_name().unwrap(), name.as_str());
-            #[cfg(windows)]
-            {
-                let identity = Command::new("powershell.exe")
-                    .args(["-NoProfile", "-NonInteractive", "-Command",
-                        "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value"])
-                    .output().expect("read the current Windows user SID");
-                assert!(identity.status.success(), "could not read the current Windows user SID");
-                let sid = String::from_utf8(identity.stdout).unwrap();
-                let sid = sid.trim();
-                assert!(sid.starts_with("S-1-") && sid[4..].chars().all(|c| c.is_ascii_digit() || c == '-'));
-                // Grant first so removing inherited temp-directory access cannot lock us out.
-                for args in [vec!["/grant:r".to_string(), format!("*{sid}:(OI)(CI)F")], vec!["/inheritance:r".to_string()]] {
-                    let out = Command::new("icacls.exe").arg(&resolved).args(args).output().expect("set fixture ACL");
-                    assert!(out.status.success(), "fixture ACL failed: {}", String::from_utf8_lossy(&out.stderr));
-                }
-            }
-            dir
-        });
-        crate::secret_store::setup(dir);
-        assert_eq!(crate::secret_store::dir(), Some(dir.as_path()));
+        let dir = crate::secret_store::test_dir();
+        assert_eq!(crate::secret_store::dir(), Some(dir));
     }
 
     /// Issue #206: a first VPS cloud task failed twice — the multi-line private key was
