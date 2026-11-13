@@ -3679,3 +3679,30 @@ test('state pulses share one phase, whenever they mount', async ({ page }) => {
   expect(apart(phases[0], phases[1]), String(phases)).toBeLessThan(17);
   expect(apart(phases[0], phases[2]), String(phases)).toBeLessThan(17);
 });
+
+
+for (const [platform, modifier, spoken, key] of [['MacIntel', '⌘', 'Command', 'Meta'], ['Win32', 'Ctrl', 'Control', 'Control'], ['Linux x86_64', 'Ctrl', 'Control', 'Control']]) {
+  test(`the main composer names the ${platform} steer modifier`, async ({ page }) => {
+    await page.addInitScript(platform => Object.defineProperty(navigator, 'platform', { get: () => platform }), platform);
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch(), source = await response.text();
+      const marker = /switch\s*\(command\)\s*\{/;
+      expect(source).toMatch(marker);
+      await route.fulfill({ response, body: source.replace(marker, `
+        if (command === 'send_message') { session(args.sessionId).status = 'running'; return; }
+        if (command === 'steer_task') { window.__platformSteer = args; return; }
+        switch (command) {`) });
+    });
+    await page.reload();
+    await expect(prompt(page)).toBeEnabled();
+    await prompt(page).fill('Keep working');
+    await prompt(page).press('Enter');
+    await expect(page.getByRole('button', { name: 'Stop task', exact: true })).toBeVisible();
+    await expect(prompt(page)).toHaveAttribute('placeholder', `Queue a follow-up · ${modifier}↩ steers now`);
+    await expect(prompt(page)).toHaveAttribute('aria-description', new RegExp(`${spoken} Enter to steer the running turn`));
+    const sessionId = await prompt(page).getAttribute('data-session-id');
+    await prompt(page).fill('Steer from the keyboard');
+    await prompt(page).press(`${key}+Enter`);
+    await expect.poll(() => page.evaluate(() => (window as any).__platformSteer)).toEqual({ sessionId, text: 'Steer from the keyboard' });
+  });
+}
