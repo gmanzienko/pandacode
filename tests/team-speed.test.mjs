@@ -80,3 +80,13 @@ test('team speed clears a stale Claude tier even when its per-task catalog adver
   assert.deepEqual(providers, catalog);
   assert.equal(providers[1].models[0].speedTiers[0].key, 'fast');
 });
+
+
+test('a reselected Codex tier survives normalization whenever the loaded catalog supports its key', () => {
+  for (const model of providers[0].models) {
+    const tiers = modelSpeedTiers(providers, 'codex', model.id);
+    for (const tier of tiers) {
+      assert.deepEqual(keepSpeed(tier.key, tiers, model.id), { tier: tier.key, note: '' });
+    }
+  }
+});

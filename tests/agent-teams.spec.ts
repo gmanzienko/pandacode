@@ -533,3 +533,71 @@ test('classic teams clear loaded Claude Fast and save default speed despite its 
   expect(worker).toMatchObject({ provider: 'claude', model: 'opus' });
   expect(worker).not.toHaveProperty('serviceTier');
 });
+
+
+for (const { model, tier } of [
+  { model: 'gpt-6-luna', tier: 'ultrafast' },
+  { model: 'gpt-5.6-sol', tier: 'fast' },
+  { model: 'gpt-6-astra', tier: 'ultrafast' },
+]) test(`classic Codex profile reselect after discovery fits ${tier} to ${model}`, async ({ page }) => {
+  await install(page);
+  await page.evaluate(async ({ model, tier }) => {
+    const library = await (window as any).__teamInvoke('architect_profiles');
+    library.lastSetup = { architect: { provider: 'claude', model: 'opus' }, config: { workers: [{ id: 'codex', name: 'Codex', provider: 'codex', model, serviceTier: tier }], maxParallel: 1, maxRounds: 8, maxAssignments: 24, workspace: 'shared', summaryLimit: 3072 } };
+    if (model === 'gpt-6-astra') {
+      const saved = await (window as any).__teamInvoke('architect_save_profile', { id: null, name: 'Saved Codex', setup: library.lastSetup });
+      library.profiles = saved.profiles;
+    } else library.profiles.push({ id: 'saved-codex', name: 'Saved Codex', setup: structuredClone(library.lastSetup) });
+    (window as any).__agentTeams.library = library;
+  }, { model, tier });
+  await openAgents(page);
+  await settings(page).getByRole('checkbox', { name: 'Classic team setup', exact: true }).check();
+  await closeSettings(page);
+  await page.getByRole('button', { name: 'Architect & workers', exact: true }).click();
+  const setup = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'Architect & workers', exact: true }) });
+  await expect(setup.locator('.architect-speed')).toHaveCount(1);
+  await expect.poll(() => page.evaluate(() => {
+    const state = (window as any).__agentTeams;
+    return state.loadedModels?.length > 0 && state.loadedModels.length === state.calls.filter((call: any) => call.command === 'list_provider_models').length;
+  })).toBe(true);
+  await setup.getByRole('button', { name: 'Choose team profile', exact: true }).click();
+  await page.getByRole('menuitemradio', { name: 'Saved Codex', exact: true }).click();
+  const supported = model === 'gpt-6-astra';
+  const speed = setup.locator('.architect-speed'), note = setup.locator('.architect-speed-note');
+  if (model === 'gpt-5.6-sol') await expect(speed).toBeHidden();
+  else await expect(speed).toHaveValue(supported ? tier : '');
+  if (supported) await expect(note).toBeHidden();
+  else await expect.soft(note).toHaveText(`${tier === 'fast' ? 'Fast' : 'Ultrafast'} is not available for ${model}; this worker will use the default speed only if you save it that way.`);
+  // Exercise native-compatible validation of the submitted draft, not only the displayed selection.
+  await setup.getByRole('button', { name: 'Save setup', exact: true }).click();
+  const worker = (await calls(page, 'architect_configure')).at(-1).args.config.workers[0];
+  expect(worker).toMatchObject({ provider: 'codex', model });
+  if (supported) expect(worker.serviceTier).toBe(tier);
+  else expect(worker).not.toHaveProperty('serviceTier');
+  await expect(setup).toHaveCount(0);
+});
+
+for (const discovery of ['pending', 'failed']) test(`classic Codex profile reselect preserves saved tier while discovery is ${discovery}`, async ({ page }) => {
+  await install(page);
+  await page.evaluate(async discovery => {
+    const { mountArchitectSetup } = await import('/src/architect.ts');
+    const state = (window as any).__agentTeams;
+    const worker = { id: 'codex', name: 'Codex', provider: 'codex' as const, model: 'gpt-6-luna', serviceTier: 'ultrafast' };
+    const setup = { architect: { provider: 'codex' as const, model: worker.model }, config: { workers: [worker], maxParallel: 1, maxRounds: 8, maxAssignments: 24, workspace: 'shared' as const, summaryLimit: 3072 } };
+    const host = document.createElement('div'); host.id = 'reselect-control'; document.body.append(host);
+    mountArchitectSetup(host, {
+      task: { provider: 'codex', model: worker.model } as any, team: null,
+      library: { profiles: [{ id: 'saved', name: 'Saved Codex', setup, updatedAt: 0 }], lastSetup: setup, activeProfileId: null, enabled: false },
+      // A cached catalog is insufficient: only successful live discovery may discard a saved tier.
+      providers: [{ id: 'codex', name: 'Codex', installed: true, models: [{ id: worker.model, name: worker.model, description: '' }] }] as any,
+      loadModels: () => discovery === 'pending' ? new Promise(() => {}) : Promise.reject(new Error('Catalog unavailable')),
+      save: async config => { state.savedControl = structuredClone(config); },
+    });
+  }, discovery);
+  const setup = page.locator('#reselect-control');
+  await setup.getByRole('button', { name: 'Choose team profile', exact: true }).click();
+  await page.getByRole('menuitemradio', { name: 'Saved Codex', exact: true }).click();
+  await expect(setup.locator('.architect-speed-note')).toBeHidden();
+  await setup.getByRole('button', { name: 'Save setup', exact: true }).click();
+  expect(await page.evaluate(() => (window as any).__agentTeams.savedControl.workers[0].serviceTier)).toBe('ultrafast');
+});

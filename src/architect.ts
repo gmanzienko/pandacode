@@ -143,6 +143,7 @@ export function mountArchitectSetup(host: HTMLElement, options: SetupOptions): S
   delete config.council;
   const architect: ModelSelection = team?.pendingSetup ? structuredClone(team.pendingSetup.architect) : !team && library.lastSetup && !task.resumeId ? structuredClone(library.lastSetup.architect) : { provider: task.provider, model: task.model, reasoningEffort: task.reasoningEffort ?? null };
   let disposed = false, pending = false, picker: (() => void) | undefined;
+  const loadedProviders = new Set<ProviderId>();
   const canDisable = Boolean(team) && !teamActive(team) && !team?.workers.length && !team?.round;
   const setupHelp = 'Applies to the next architect turn. Existing workers keep their models.';
   const parallelHelp = 'Maximum simultaneous assignments. The architect dispatches independent work; overlapping writes or dependencies may wait.';
@@ -200,7 +201,7 @@ export function mountArchitectSetup(host: HTMLElement, options: SetupOptions): S
         speed.innerHTML = speedOptions(tiers, kept.tier); speed.hidden = !speed.innerHTML;
         note.textContent = kept.note; note.hidden = !kept.note; before = tiers;
       };
-      if (config.workers[index].provider !== 'codex') syncSpeed();
+      if (config.workers[index].provider !== 'codex' || loadedProviders.has(config.workers[index].provider)) syncSpeed();
       speed.addEventListener('change', () => { if (speed.value) config.workers[index].serviceTier = speed.value; else delete config.workers[index].serviceTier; note.hidden = true; savedProfiles.changed(); });
       row.querySelector<HTMLButtonElement>('.architect-model')!.addEventListener('click', event => choose(event.currentTarget as HTMLButtonElement, config.workers[index], true, syncSpeed));
     });
@@ -214,6 +215,7 @@ export function mountArchitectSetup(host: HTMLElement, options: SetupOptions): S
   /** `loaded`: harnesses whose live catalog just arrived, whose Speed choices now follow it. */
   function refreshModelLabels(loaded: ReadonlySet<ProviderId>): void {
     if (disposed) return;
+    loaded.forEach(provider => loadedProviders.add(provider));
     host.querySelector<HTMLButtonElement>('.architect-model')!.innerHTML = modelMarkup(architect, providers);
     profiles.querySelectorAll<HTMLElement>('.architect-profile').forEach(row => {
       const profile = config.workers.find(profile => profile.id === row.dataset.profileId);
