@@ -925,22 +925,24 @@ const readingLine = (): number => transcriptScroller.getBoundingClientRect().top
 /** The live card shrinking (a result card or the trace folding) would clamp the scroll and slide everything above it down:
  * the height it gave up becomes blank room under it, which new content grows back into. Only while the card's top is in
  * view: a card taller than the window moves down until its top arrives, or the fold would leave the window empty. */
-let liveCardSeen: { card: Element; height: number } | undefined;
+let liveCardSeen: { card: Element; height: number; top: number } | undefined;
 function keepTopOnShrink(): void {
   const card = document.querySelector('#stream-region .turn-card.is-live'), before = liveCardSeen;
   if (!card) { liveCardSeen = undefined; return; }
   const box = card.getBoundingClientRect();
-  liveCardSeen = { card, height: box.height };
-  if (before?.card !== card || box.height >= before.height - 0.5 || tailBridging) return;
+  liveCardSeen = { card, height: box.height, top: transcriptScroller.scrollTop };
+  if (before?.card !== card || box.height >= before.height || tailBridging) return;
   // At the end, the scroll has already lost what the card gave up (a clamp or scroll anchoring, in layout, before this runs).
   const end = transcriptScroller.scrollHeight - transcriptScroller.clientHeight, top = transcriptScroller.scrollTop;
   if (top < end - 1) return;
   const clear = readingLine();
-  const aim = Math.min(top + before.height - box.height, top + box.top - clear);
+  // A follow can finish after the last resize; the snapshot also survives a native clamp updating lastTranscriptTop.
+  const aim = Math.min(Math.max(top, before.top, lastTranscriptTop), top + box.top - clear);
   if (aim <= top) return;
   tailSession = state.sessionId;
   setTailRoom(tailRoom + aim - end);
   transcriptScroller.scrollTop = aim;
+  liveCardSeen.top = transcriptScroller.scrollTop;
   // Where it landed, not where it was aimed: the room is whole pixels, and a fraction short would read as the reader scrolling up.
   lastTranscriptTop = transcriptScroller.scrollTop;
 }
@@ -1889,7 +1891,8 @@ function renderNavigation(): void {
   window.clearTimeout(activityTimer);
   if (!document.hidden) {
     const expiry = Math.min(state.sessions.reduce((next, s) => activeTask(s, now) ? Math.min(next, lastActivity(s)! + ACTIVITY_WINDOW) : next, Infinity));
-    if (Number.isFinite(expiry)) activityTimer = window.setTimeout(renderNavigation, Math.min(2147483647, Math.max(1, expiry - now)));
+    // setTimeout counts from this call, so the delay must not reuse the `now` the render started with.
+    if (Number.isFinite(expiry)) activityTimer = window.setTimeout(renderNavigation, Math.min(2147483647, Math.max(1, expiry - Date.now())));
   }
 }
 function scheduleNavigation(): void {

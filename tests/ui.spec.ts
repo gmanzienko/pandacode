@@ -2187,8 +2187,13 @@ test('reports a token count in /status without inventing an unavailable context 
   const sessionId = await startControlledStatusStream(page, true);
   await page.getByRole('button', { name: 'Stop task', exact: true }).click();
   await expect(prompt(page)).toBeEnabled();
-  // After the stop: the preview's session list carries no usage, so a report from before it is refreshed away.
+  // The report lands after the stop, so the session listing must retain it for a later /status.
   await emitStatusEvents(page, sessionId, [{ kind: 'usage', text: '', data: { usedTokens: 24000, contextWindow: null } }]);
+  const reported = await page.evaluate(async id => {
+    const { invoke } = await import((window as any).__pandacodePreviewUrl);
+    return (await invoke('list_sessions', {})).find((session: { id: string }) => session.id === id).contextUsage;
+  }, sessionId);
+  expect(reported).toEqual({ usedTokens: 24000, contextWindow: null });
   const text = await statusText(page);
   expect(text).toContain('24,000');
   expect(text).not.toContain('%');
@@ -2466,6 +2471,16 @@ test('lists pending tasks of every project in Finished, which folds and stays fo
 });
 
 test('moves a task to inactive automatically at the 24 hour response boundary', async ({ page }) => {
+  // A slow render can leave its initial time behind the clock used to schedule the expiry.
+  await page.route('**/src/main.ts*', async route => {
+    const response = await route.fetch(), source = await response.text();
+    const start = source.indexOf('function renderNavigation()'), end = source.indexOf('\n}', start);
+    const navigation = source.slice(start, end);
+    expect(navigation).toContain('const now = Date.now();');
+    await route.fulfill({ response, body: source.slice(0, start)
+      + navigation.replace('const now = Date.now();', 'const now = Date.now() - (window.__staleActivityRender ? 200 : 0);') + source.slice(end)
+      + '\nwindow.__renderStaleActivity = () => { window.__staleActivityRender = true; try { renderNavigation(); } finally { window.__staleActivityRender = false; } };' });
+  });
   await page.clock.install({ time: new Date('2026-09-12T12:00:00Z') });
   await page.reload();
   await expect(taskRow(page, 'session-1', 'active')).toBeVisible();
@@ -2474,6 +2489,7 @@ test('moves a task to inactive automatically at the 24 hour response boundary', 
     const sessions = await invoke('list_sessions', {});
     return sessions.find((session: { id: string }) => session.id === 'session-1').lastResponseAt + 24 * 60 * 60 * 1000;
   });
+  await page.evaluate(() => (window as any).__renderStaleActivity());
   await page.clock.pauseAt(expiresAt - 1);
   await expect(taskRow(page, 'session-1', 'active')).toBeVisible();
   await page.clock.fastForward(1);

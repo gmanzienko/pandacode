@@ -3,7 +3,7 @@ import { VOICE_CANCELLED } from './voice-types';
 import realVoiceCatalog from '../src-tauri/src/voice/local/catalog.json';
 import { previewHub, previewRepos } from './preview-github-hub';
 import type { AgentEvent, BrowserStatus, FileEntry, GitStatus, Message, MessagePage, Project, Provider, ProviderId, ProviderModel, Session, TaskStage, ToolActivity } from './types';
-import { fallbackModel } from './model-catalog';
+import { fallbackModel, parseContextUsage } from './model-catalog';
 import { historicalProvider } from './provider-handoff';
 import { isPreviewableFile } from './file-links';
 import { DISMISS_BATCH } from './thread-errors';
@@ -660,6 +660,11 @@ const architectStreams = new Set<string>();
 function agent(event: AgentEvent) {
   if (event.kind === 'done') architectStreams.delete(event.sessionId);
   else if (['status', 'text', 'tool', 'message_start'].includes(event.kind)) architectStreams.add(event.sessionId);
+  // `record_context_usage` in lib.rs keeps a report past its turn, so a listing still carries it.
+  if (event.kind === 'usage') {
+    const usage = parseContextUsage(event.data), reported = sessions.find(task => task.id === event.sessionId);
+    if (reported && usage) reported.contextUsage = usage;
+  }
   emit('agent-event', event);
 }
 /** `MESSAGE_LIMIT` in lib.rs. */
