@@ -1169,9 +1169,15 @@ S/A/B/C/D rank in Settings makes them routable through a synthetic card
 but `gmodel` (GLM-5.3) and `dmodel` (DeepSeek-V4-Pro) resolve to text-only cards, so the
 router excludes them from vision tasks; the other seven rated models accept images.
 
-**Approvals.** Qoder's four session modes are its permission modes, mapped 1:1:
-Standard → `default`, Accept edits → `acceptEdits`, Plan → `plan`, Full access →
-`bypassPermissions`; a mode the CLI stops advertising fails the turn. Read, search,
+**Approvals.** Qoder's ACP session modes are its permission modes. Standard uses
+`default`, Accept edits `acceptEdits`, Plan `plan`, and Full access the explicitly
+advertised `bypassPermissions` or `yolo`, preferring `bypassPermissions` if both exist.
+No other Full fallback is used. The recorded 1.1.13 contract includes `plan` and
+`bypassPermissions`. Static inspection of installed 1.1.88 defines `default`,
+`acceptEdits`, `auto`, `dontAsk` and `yolo`, with no `plan`. With that contract, Plan
+fails closed during session setup, before model selection or `session/prompt`; it
+never falls back to a writable mode. The `yolo` compatibility is covered offline,
+not verified by a live Full turn. Read, search,
 fetch and think requests are allowed in every mode. In Accept edits, edit requests that
 still ask are approved by the shared ACP path rather than Qoder's own policy; commands
 still ask you. Plan is Qoder's native `plan` mode with no prompt prefix, but that mode
@@ -1188,7 +1194,8 @@ preserving the task's model (`--model`), reasoning effort (`--reasoning-effort`)
 resume (`--resume <session-id>`). The TUI's permission modes are snake_case and have no
 Plan: Standard → `--permission-mode default`, Accept edits → `accept_edits`, Full
 access → `bypass_permissions`. A Plan task is refused with “Qoder's console cannot start
-in Plan mode. Use task chat instead.”
+in Plan mode. Use task chat instead.” Task chat also requires the CLI to advertise
+ACP `plan`; the installed 1.1.88 static contract does not.
 
 **Capabilities and MCP.** Settings → Tools & add-ons inspects Qoder's MCP servers from
 `~/.qoder/settings.json` (`mcpServers`) and the project's `.mcp.json`, and its skills
@@ -1230,11 +1237,21 @@ config-root precedence was read from the installed bundle on 2026-11-12 without
 launching it. The recorded frames back the unit tests in `providers/qoder.rs`, and an
 ignored smoke test (`installed_qoder_lists_models_with_efforts`) reads the real catalog
 without prompting. The ignored resume smoke test sends at most two prompts, and
-`installed_qoder_plan_refuses_write` sends one write request in Plan mode. Both collect
-test-owned session IDs from events and attempt checked deletion before assertions,
-including after a failed or timed-out turn. The Plan test requires an actual decline
+`installed_qoder_plan_refuses_write` attempts one write request in Plan mode.
+An unadvertised Plan fails explicitly as unsupported during setup, after checking
+unchanged files, no approvals or executed tools, and acknowledged cleanup. It does
+not count as passing write enforcement. A supported Plan requires an actual decline
 event plus an unchanged sentinel and absent target; a text-only refusal is inconclusive.
-These live tests have not been rerun as part of the offline cleanup fix.
+Both tests collect test-owned session IDs from events and attempt checked deletion
+before assertions, including after a failed or timed-out turn. Qoder setup errors
+preserve the newly returned session ID for that cleanup.
+
+A later 1.1.88 live write and resume check passed. The failed Plan check's historical
+log did not preserve its setup error or cleanup acknowledgement; neither is
+recoverable. Static inspection explains the current missing-mode failure but is not
+a new protocol capture. Two successful prompt-bearing turns are established; the
+exact historical number of transmitted prompts or inference requests is unknown.
+No new CLI sessions or prompts were run for the mode compatibility change.
 
 ## Muse Code
 
