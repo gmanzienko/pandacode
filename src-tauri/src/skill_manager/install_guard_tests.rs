@@ -179,18 +179,19 @@ mod concurrent_error_regressions {
 
 mod home_override_tests {
     use super::*;
+    use crate::skill_manager::roots::fixture_path;
     #[test]
     fn skill_manager_installs_honor_active_and_saved_grok_and_hermes_homes() {
         let mut homes = Homes {
-            grok: Some("/active-grok".into()),
-            hermes: Some("/active-hermes".into()),
+            grok: Some(fixture_path("/active-grok")),
+            hermes: Some(fixture_path("/active-hermes")),
             ..Homes::default()
         };
         for harness in ["grok", "hermes"] {
-            homes.add_home(harness, PathBuf::from(format!("/saved-{harness}")));
+            homes.add_home(harness, fixture_path(&format!("/saved-{harness}")));
         }
         let calls = invocations(
-            Path::new("/home"),
+            fixture_path("/home").as_path(),
             &homes,
             "owner/repo",
             &[],
@@ -199,17 +200,17 @@ mod home_override_tests {
         )
         .unwrap();
         assert_eq!(calls.len(), 3);
-        assert_eq!(calls[0].1["GROK_HOME"], "/active-grok");
-        assert_eq!(calls[0].1["HERMES_HOME"], "/active-hermes");
+        assert_eq!(calls[0].1["GROK_HOME"], fixture_path("/active-grok").to_string_lossy());
+        assert_eq!(calls[0].1["HERMES_HOME"], fixture_path("/active-hermes").to_string_lossy());
         assert!(calls
             .iter()
-            .any(|(_, env)| env["GROK_HOME"] == "/saved-grok"));
+            .any(|(_, env)| env["GROK_HOME"] == fixture_path("/saved-grok").to_string_lossy()));
         assert!(calls
             .iter()
-            .any(|(_, env)| env["HERMES_HOME"] == "/saved-hermes"));
+            .any(|(_, env)| env["HERMES_HOME"] == fixture_path("/saved-hermes").to_string_lossy()));
         assert_eq!(
             invocations(
-                Path::new("/home"),
+                fixture_path("/home").as_path(),
                 &homes,
                 "owner/repo",
                 &[],
@@ -276,7 +277,7 @@ mod npx_isolation_tests {
         fs::create_dir_all(project.join("node_modules/skills")).unwrap();
         fs::write(project.join(".npmrc"), "registry=http://evil.invalid/").unwrap();
         let prefs = f.0.join("app/skill-manager.json");
-        let neutral = f.0.join("app/skills-cli");
+        let neutral = f.0.join("app").join("skills-cli");
         let mut seen = Vec::new();
         for target in [Some(project.as_path()), None] {
             let _ = add_at(

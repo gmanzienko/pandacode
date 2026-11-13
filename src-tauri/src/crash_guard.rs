@@ -370,8 +370,8 @@ mod gate_tests {
         assert_eq!(why(NotRestarted::Failed), "PandaCode crashed at 2023-11-14 22:13:20 UTC and didn't restart: the restart failed. Details: /data/crash-reports");
         // A named report is the details; only its file name is used.
         let named = |name: &str| line(&Pending { report: Some(name.into()), ..notice(true, false) }, at);
-        assert!(named("panic-1.txt").ends_with(". Details: /data/crash-reports/panic-1.txt"));
-        assert!(named("../../etc/passwd").ends_with(". Details: /data/crash-reports/passwd"));
+        assert!(named("panic-1.txt").ends_with(&format!(". Details: {}", dir.join("panic-1.txt").display())));
+        assert!(named("../../etc/passwd").ends_with(&format!(". Details: {}", dir.join("passwd").display())));
         for text in [off, why(NotRestarted::Failed), line(&paused, at)] {
             assert!(!text.contains("secret") && !text.contains('\n'), "{text}");
         }

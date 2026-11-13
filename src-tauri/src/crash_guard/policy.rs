@@ -237,16 +237,20 @@ mod tests {
 
     #[test]
     fn a_stale_term_or_fatal_marker_no_longer_explains_a_death() {
+        #[cfg(unix)]
+        let cause = "Crashed with SIGSEGV";
+        #[cfg(not(unix))]
+        let cause = "Crashed with signal 11";
         // A chained SIGTERM handler that did not exit: a crash much later is a crash.
         let late = NOW + TERM_GRACE_MS + 1;
         let termed_then_crashed = watch(&["term 15"]).apply_line("signal 11", late);
-        assert_eq!(classify(&termed_then_crashed, ExitStatus::Unknown, late), Death::Crash("Crashed with SIGSEGV".into()));
+        assert_eq!(classify(&termed_then_crashed, ExitStatus::Unknown, late), Death::Crash(cause.into()));
         // A fault another handler recovered from, then a silent kill much later: a kill.
         let recovered = watch(&["signal 11"]);
         assert_eq!(classify(&recovered, ExitStatus::Unknown, NOW + FATAL_GRACE_MS + 1), Death::Killed(None));
-        assert_eq!(classify(&recovered, ExitStatus::Unknown, NOW + FATAL_GRACE_MS), Death::Crash("Crashed with SIGSEGV".into()));
+        assert_eq!(classify(&recovered, ExitStatus::Unknown, NOW + FATAL_GRACE_MS), Death::Crash(cause.into()));
         // A slow core dump keeps the pipe open well past the termination grace.
-        assert_eq!(classify(&recovered, ExitStatus::Unknown, NOW + 5 * 60 * 1000), Death::Crash("Crashed with SIGSEGV".into()));
+        assert_eq!(classify(&recovered, ExitStatus::Unknown, NOW + 5 * 60 * 1000), Death::Crash(cause.into()));
     }
 
     #[test]

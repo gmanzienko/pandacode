@@ -6,7 +6,7 @@
 // holds a gate helper and the method's name. Exceptions are listed in ALLOWED with the reason.
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -86,7 +86,8 @@ test('every caller of a Control/Full host method also gates it', () => {
     const source = readFileSync(path, 'utf8');
     const imports = [...source.matchAll(/^import\s*\{([^}]*)\}\s*from '[^']*connect\/api\/[^']+';$/gm)].flatMap(m => m[1].split(',').map(n => n.trim().split(/\s+as\s+/)[0]));
     const gated = GATES.test(source);
-    const relative = path.slice(MOBILE.length);
+    // The key is relative to MOBILE with '/' separators, as written in ALLOWED, on every host.
+    const relative = path.slice(MOBILE.length).split(sep).join('/');
     for (const [wrapper, methods] of calls) {
       // Only wrappers imported from connect/api (a local `setRouting` state setter is not the API's).
       if (!imports.includes(wrapper)) continue;

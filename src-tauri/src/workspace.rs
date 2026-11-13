@@ -300,6 +300,8 @@ fn skip_submodule_args() -> Vec<&'static str> {
 /// remote helper or `ext::` command can run.
 fn git_global_args(hooks: bool) -> Vec<&'static str> {
     let mut args = vec!["--no-pager", "--literal-pathspecs", "-c", "core.fsmonitor=false", "-c", "color.ui=false"];
+    #[cfg(windows)]
+    args.extend(["-c", "core.longpaths=true"]);
     if !hooks {
         args.extend(["-c", "core.hooksPath=/dev/null"]);
         for rule in SKIP_HOOKS_PROTOCOLS {
@@ -2571,6 +2573,7 @@ mod tests {
                 this.git(&["config", "user.name", "Workspace Tests"]);
                 this.git(&["config", "user.email", "workspace@example.invalid"]);
                 this.git(&["config", "commit.gpgSign", "false"]);
+                this.git(&["config", "core.autocrlf", "false"]);
                 this.git(&[
                     "-c",
                     "core.hooksPath=/dev/null",
@@ -2583,7 +2586,10 @@ mod tests {
             this
         }
         fn git(&self, args: &[&str]) {
-            let result = Command::new("git")
+            let mut command = Command::new("git");
+            #[cfg(windows)]
+            command.args(["-c", "core.longpaths=true"]);
+            let result = command
                 .arg("-C")
                 .arg(git_path(&self.root))
                 .args(args.iter().map(|arg| git_path(Path::new(arg))))
@@ -3019,6 +3025,14 @@ mod tests {
         assert!(git_commit(&f.root, "Should fail".into(), Trust::Desktop)
             .unwrap_err()
             .contains("Test hook refused"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_long_paths_are_enabled_for_both_hook_modes() {
+        for hooks in [true, false] {
+            assert!(git_global_args(hooks).windows(2).any(|args| args == ["-c", "core.longpaths=true"]));
+        }
     }
 
     #[test]

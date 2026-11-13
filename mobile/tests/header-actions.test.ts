@@ -4,7 +4,7 @@
 // which draws Android's headerLeft/headerRight itself; this keeps a new screen from losing its actions there.
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -28,7 +28,8 @@ function routes(dir: string): string[] {
 
 test('routes put header buttons and menus through HeaderActions, so Android draws them', () => {
   const offenders = routes(app)
-    .map(path => ({ name: relative(app, path), source: readFileSync(path, 'utf8') }))
+    // With '/' separators as written in ALLOWED, on every host.
+    .map(path => ({ name: relative(app, path).split(sep).join('/'), source: readFileSync(path, 'utf8') }))
     .filter(({ name, source }) => TOOLBAR_ITEM.test(source) && !(name in ALLOWED))
     .map(({ name }) => name);
   assert.deepEqual(offenders, [], `Use HeaderActions (src/ui/HeaderActions.tsx) instead of Stack.Toolbar.Button/Menu in: ${offenders.join(', ')}`);

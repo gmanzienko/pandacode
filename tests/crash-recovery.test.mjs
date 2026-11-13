@@ -189,8 +189,14 @@ test('the paused lead says when the last crash was while there is room, and give
   assert.ok(paused(quiet).startsWith(pausedLead(at(60_000))));
   assert.equal(paused({ interrupted: false, nothingOpened: true }), `${pausedLead(at(60_000))} ${NOTHING_OPENED_LINE} ${resume()}`);
   assert.equal(paused({ interrupted: true }), `${pausedLead(at(60_000))} ${INTERRUPTED_LINE} ${resume()}`);
-  // Beside stopped agents and a named thread the time and "Your last thread" give way; when restarts resume never does.
-  assert.equal(paused({ interrupted: true, heldBack: 'Fix login' }), `${PAUSED_LEAD} ${INTERRUPTED_SHORT} ${heldBackLine('Fix login', true)} ${resume()}`);
+  // Beside stopped agents and a named thread the time and "Your last thread" give way; when restarts
+  // resume never does. How wide a clock time is depends on the host locale ("at 11:59 PM" is wider
+  // than "at 23:59"), so whether the timed lead keeps its 183 characters is measured, not assumed.
+  const timed = `${pausedLead(at(60_000))} ${INTERRUPTED_SHORT} ${heldBackLine('Fix login', true)} ${resume()}`;
+  const untimed = `${PAUSED_LEAD} ${INTERRUPTED_SHORT} ${heldBackLine('Fix login', true)} ${resume()}`;
+  const text = paused({ interrupted: true, heldBack: 'Fix login' });
+  assert.equal(text, timed.length <= PAUSED_NOTICE_LIMIT ? timed : untimed);
+  assert.ok(text.length <= PAUSED_NOTICE_LIMIT, text);
   // A long name takes the shortest held-back sentence.
   const long = 'Refine the navigation of the settings';
   assert.equal(paused({ interrupted: true, heldBack: long }), `${PAUSED_LEAD} ${INTERRUPTED_SHORT} ${keptClosedLine(long)} ${resume()}`);
@@ -464,9 +470,14 @@ test('a crash without a restart, with restarts on and a report, gives the next s
   assert.ok(!crashNotice(crash, NOW, { interrupted: false, restartsOff: true }).text.includes(REPORT_LINE), 'the restarts-off line is the closing line');
   assert.ok(!crashNotice({ ...crash, hasReport: false }, NOW, quiet).text.includes(REPORT_LINE), 'no report, nothing to point at');
   assert.ok(!crashNotice({ ...crash, restarted: true }, NOW, quiet).text.includes(REPORT_LINE), 'a restart needs no next step');
-  // Under pressure it goes before "Your last thread" or the title gives way.
+  // Under pressure it goes before "Your last thread" or the title gives way. The title keeps "Your
+  // last thread" while the host locale's clock text leaves it room in NOTICE_LIMIT, and gives the
+  // wording up for the compact sentence when it does not.
   const tight = crashNotice(crash, NOW, { interrupted: true, heldBack: 'Refine the navigation of the settings page' }).text;
-  assert.equal(tight, `${notRestartedLead(at(3 * 60 * 60_000))} ${INTERRUPTED_SHORT} ${heldBackLine('Refine the navigation of the settings page', true)}`);
+  const named = `${notRestartedLead(at(3 * 60 * 60_000))} ${INTERRUPTED_SHORT} ${heldBackLine('Refine the navigation of the settings page')}`;
+  const bare = `${notRestartedLead(at(3 * 60 * 60_000))} ${INTERRUPTED_SHORT} ${heldBackLine('Refine the navigation of the settings page', true)}`;
+  assert.equal(tight, named.length <= NOTICE_LIMIT ? named : bare);
+  assert.ok(tight.length <= NOTICE_LIMIT, tight);
 });
 
 test('paused with a named thread says no thread was opened in one sentence, short of room in the shortest kept-closed sentence', () => {
@@ -474,8 +485,20 @@ test('paused with a named thread says no thread was opened in one sentence, shor
   const paused = (heldBack, interrupted = false) => crashNotice(recovery({ restarted: false, restartsPaused: true, crashedAt: NOW - 60_000 }), NOW, { interrupted, heldBack, nothingOpened: true }).text;
   assert.ok(paused('Fix login').includes(`${NO_THREAD_OPENED} your last thread, “Fix login”, caused this.`), paused('Fix login'));
   assert.ok(paused('').includes(`${NO_THREAD_OPENED} an untitled thread caused this.`), paused(''));
-  // Tight: the agents line is short and the shortest held-back sentence still says nothing was opened.
-  assert.equal(paused('Fix the login page now', true), `${PAUSED_LEAD} ${INTERRUPTED_SHORT} “Fix the login page now” was kept closed; no thread was opened. ${resume()}`);
+  // Tight: the agents line is short and the held-back sentence still says nothing was opened, in the
+  // longest of its forms that fits PAUSED_NOTICE_LIMIT (the clock time's width depends on the host
+  // locale, and it decides whether the compact or only the shortest kept-closed sentence fits).
+  const form = line => `${PAUSED_LEAD} ${INTERRUPTED_SHORT} ${line} ${resume()}`;
+  const forms = [
+    heldBackLine('Fix the login page now', false, true),
+    heldBackLine('Fix the login page now', true, true),
+    keptClosedLine('Fix the login page now', true),
+  ];
+  const keptClosed = keptClosedLine('Fix the login page now', true);
+  const fits = forms.map(form).find(line => line.length <= PAUSED_NOTICE_LIMIT);
+  assert.ok(fits, `the shortest kept-closed sentence fits: ${form(keptClosed)}`);
+  assert.equal(paused('Fix the login page now', true), fits);
+  assert.ok(/no thread was opened/i.test(fits), fits);
   // Tighter: it would not fit even with the title at MIN_TITLE, so "no thread was opened" goes, last, and the whole title comes back.
   const tight = paused('Refactor the authentication middleware', true);
   assert.equal(tight, `${PAUSED_LEAD} ${INTERRUPTED_SHORT} ${keptClosedLine('Refactor the authentication middleware')} ${resume()}`);
