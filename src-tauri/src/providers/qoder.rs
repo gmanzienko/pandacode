@@ -5,7 +5,8 @@ use super::*;
 use crate::slash_commands::claude::Pipe;
 
 const STARTUP: Duration = Duration::from_secs(60);
-const CLEANUP: Duration = Duration::from_secs(2);
+// Qoder deletion includes a network round trip; valid replies can exceed two seconds.
+const CLEANUP: Duration = Duration::from_secs(10);
 
 /// Shown when Qoder has no stored sign-in.
 pub(super) const SIGN_IN: &str =
@@ -99,8 +100,18 @@ pub(super) async fn delete_session(pipe: &mut Pipe, id: &str) -> Result<(), Stri
     const FAILED: &str = "Qoder session cleanup failed: session/delete did not return a matching success result.";
     pipe.set_deadline_after(CLEANUP);
     let reply = request(pipe, &json!({"jsonrpc":"2.0","id":9000,"method":"session/delete","params":{"sessionId":id}}))
-        .await.map_err(|_| FAILED.to_owned())?;
-    if reply.get("error").is_some() || !reply.get("result").is_some_and(Value::is_object) {
+        .await.map_err(|_| if pipe.timed_out() {
+            "Qoder session cleanup timed out after 10 seconds.".to_owned()
+        } else {
+            "Qoder session cleanup failed: transport ended before acknowledgement.".to_owned()
+        })?;
+    if let Some(error) = reply.get("error") {
+        return Err(match error["code"].as_i64() {
+            Some(code) => format!("Qoder session cleanup failed: RPC error {code}."),
+            None => "Qoder session cleanup failed: RPC error.".to_owned(),
+        });
+    }
+    if !reply.get("result").is_some_and(Value::is_object) {
         return Err(FAILED.into());
     }
     Ok(())
@@ -816,11 +827,14 @@ else if(r.method==='session/prompt') {{
     async fn qoder_probe_requires_delete_ack_and_preserves_walk_failure() {
         let mut failures = vec![];
         for (case, delete, walk, expected) in [
+            ("delayed-valid-ack", "setTimeout(()=>send({id:r.id,result:{}}),2400)", "send({id:r.id,result:{}})", None),
             ("success", "send({id:r.id,result:{}})", "send({id:r.id,result:{}})", None),
-            ("delete-error", "send({id:r.id,error:{code:-1,message:'private fixture secret'}})", "send({id:r.id,result:{}})", Some("cleanup")),
-            ("eof", "process.exit(0)", "send({id:r.id,result:{}})", Some("cleanup")),
+            ("delete-error", "send({id:r.id,error:{code:-1,message:'private fixture secret'}})", "send({id:r.id,result:{}})", Some("RPC error -1")),
+            ("eof", "process.exit(0)", "send({id:r.id,result:{}})", Some("transport ended")),
             ("missing-result", "send({id:r.id})", "send({id:r.id,result:{}})", Some("cleanup")),
-            ("timeout", "setTimeout(()=>{},5000)", "send({id:r.id,result:{}})", Some("cleanup")),
+            ("timeout", "setTimeout(()=>{},20000)", "send({id:r.id,result:{}})", Some("cleanup timed out")),
+            ("non-object-result", "send({id:r.id,result:[]})", "send({id:r.id,result:{}})", Some("cleanup")),
+            ("error-with-result", "send({id:r.id,result:{},error:{message:'private fixture secret'}})", "send({id:r.id,result:{}})", Some("RPC error")),
             ("wrong-id-then-ack", "send({id:8999,error:{code:-1}});send({id:r.id,result:{}})", "send({id:r.id,result:{}})", None),
             ("walk-error-delete-error", "send({id:r.id,error:{code:-1,message:'private fixture secret'}})", "send({id:r.id,error:{code:-1,message:'walk failed'}})", Some("model switch")),
             ("walk-timeout-fresh-delete", "setTimeout(()=>send({id:r.id,result:{}}),100)", "setTimeout(()=>{},5000)", Some("timed out")),
@@ -833,11 +847,15 @@ else if(r.method==='session/delete') {{ if(r.params.sessionId!=='owned') process
 "#);
             let (child, dir) = fake_child(&script);
             let mut pipe = Pipe::spawn(child, &dir.0, Duration::from_millis(600)).unwrap();
+            let started = std::time::Instant::now();
             let result = probe_frames(&mut pipe, &dir.0).await;
+            let elapsed = started.elapsed();
+            if elapsed > Duration::from_secs(13) { failures.push(format!("{case}: exceeded bounded cleanup")); }
+            if case == "timeout" && elapsed < Duration::from_secs(10) { failures.push("timeout: cleanup ended before ten seconds".into()); }
             pipe.finish().await;
             let deleted = requests(&dir.0).iter().any(|r| r["method"] == "session/delete" && r["params"]["sessionId"] == "owned");
             if !deleted { failures.push(format!("{case}: no delete attempted")); }
-            if matches!(case, "success" | "wrong-id-then-ack" | "walk-timeout-fresh-delete") && !dir.0.join("delete-ack.json").is_file() {
+            if matches!(case, "delayed-valid-ack" | "success" | "wrong-id-then-ack" | "walk-timeout-fresh-delete") && !dir.0.join("delete-ack.json").is_file() {
                 failures.push(format!("{case}: cleanup ended before the success acknowledgement"));
             }
             match (expected, result) {

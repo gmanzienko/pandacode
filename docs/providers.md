@@ -1147,8 +1147,12 @@ the spawning app's SDK identity and auth payload.
 (`auto`, `ultimate`, `efficient`, `smodel`, …) beside their display names. Discovery
 opens one empty session and switches through every model in order to read that model's
 `reasoning_effort` choices. After a valid session ID is returned, cleanup is attempted
-even if a switch fails, with a fresh two-second deadline and a required matching
-successful `session/delete` reply. Failed cleanup fails discovery and prevents caching
+even if a switch fails, with a fresh ten-second deadline and a required matching
+`session/delete` reply with no error and an object result. Qoder deletion includes a
+network HTTP DELETE and transcript cleanup; a valid empty-object ACK from installed
+1.1.88 took 2,442 ms, beyond the former two-second bound. Cleanup errors distinguish
+timeout, ended transport and RPC failure, exposing only an integer RPC code when
+present, never the provider error message or data. Failed cleanup fails discovery and prevents caching
 the catalog; if the model walk also failed, its original error is retained. Command
 discovery uses the same checked cleanup. A dead transport can prevent deletion, and
 an acknowledgement does not prove all history or disk residue was removed. No prompt
