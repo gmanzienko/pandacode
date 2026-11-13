@@ -47,6 +47,7 @@ export function mountAgentTeams(host: HTMLElement, options: AgentTeamsOptions): 
   const guidanceSave = host.querySelector<HTMLButtonElement>('.agent-guidance-save')!;
   const guidanceStatus = host.querySelector<HTMLElement>('.agent-guidance-status')!;
   let guidanceEdited = false;
+  const loadedProviders = new Set<ProviderId>();
   const harnessName = (id: ProviderId) => options.providers.find(provider => provider.id === id)?.name ?? id;
   let library: TeamLibrary | null = null, editing: TeamProfile | null = null, leadSelected = '', catalog: TeamModel[] = [], shown: TeamModel[] = [], disposed = false, busy = false;
 
@@ -71,6 +72,7 @@ export function mountAgentTeams(host: HTMLElement, options: AgentTeamsOptions): 
     const loaded = await Promise.allSettled(installed.map(provider => options.loadModels(provider.id)));
     return installed.flatMap((provider, index) => {
       const result = loaded[index];
+      if (result.status === 'fulfilled') loadedProviders.add(provider.id);
       return modelChoices(provider.id, result.status === 'fulfilled' ? result.value : provider.models)
         .map(model => ({ provider: provider.id, harness: provider.name, model: model.id, name: model.name, efforts: model.reasoningEfforts, speedTiers: model.speedTiers ?? [] }));
     });
@@ -88,9 +90,10 @@ export function mountAgentTeams(host: HTMLElement, options: AgentTeamsOptions): 
     models.innerHTML = groups.map(provider => `<section aria-label="${escape(harnessName(provider))}"><h4>${providerLogo(provider)}${escape(harnessName(provider))}</h4>${all.filter(model => model.provider === provider).map(model => {
       const key = modelKey(model), label = `${model.name} · ${model.harness}`;
       const effort = model.efforts?.length ? `<select class="agent-team-effort" aria-label="Worker effort for ${escape(label)}">${effortOptions(model, saved.find(worker => modelKey(worker) === key)?.reasoningEffort)}</select>` : '';
-      // Only Codex workers support speed tiers; a stale saved tier is dropped and the row says so.
-      const tiers = model.provider === 'codex' ? model.speedTiers ?? [] : [];
-      const kept = keepSpeed(saved.find(worker => modelKey(worker) === key)?.serviceTier, tiers, model.name);
+      // Only successful discovery may discard a saved Codex tier.
+      const known = model.provider !== 'codex' || loadedProviders.has(model.provider);
+      const tiers = model.provider === 'codex' && known ? model.speedTiers ?? [] : [];
+      const kept = keepSpeed(known ? saved.find(worker => modelKey(worker) === key)?.serviceTier : null, tiers, model.name);
       const options = speedOptions(tiers, kept.tier);
       const speed = options ? `<select class="agent-team-effort agent-team-speed" aria-label="Worker speed for ${escape(label)}">${options}</select>` : '';
       const note = kept.note ? `<small class="agent-team-speed-note" data-live>${escape(kept.note)}</small>` : '';
@@ -147,7 +150,8 @@ export function mountAgentTeams(host: HTMLElement, options: AgentTeamsOptions): 
       const row = box.closest('.agent-team-model');
       const effort = row?.querySelector<HTMLSelectElement>('.agent-team-effort:not(.agent-team-speed)');
       const speed = row?.querySelector<HTMLSelectElement>('.agent-team-speed');
-      return model && { ...model, reasoningEffort: effort ? effort.value || null : model.reasoningEffort ?? null, serviceTier: speed ? speed.value || null : null };
+      return model && { ...model, reasoningEffort: effort ? effort.value || null : model.reasoningEffort ?? null, serviceTier: speed ? speed.value || null
+        : model.provider === 'codex' && !loadedProviders.has(model.provider) ? editing?.setup.config.workers.find(worker => modelKey(worker) === box.value)?.serviceTier ?? null : null };
     }).filter((model): model is TeamModel => Boolean(model));
     const leadKey = models.querySelector<HTMLInputElement>('input[type=radio]:checked')?.value;
     const leadModel = included.find(model => modelKey(model) === leadKey);

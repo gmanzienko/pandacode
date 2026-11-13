@@ -601,3 +601,51 @@ for (const discovery of ['pending', 'failed']) test(`classic Codex profile resel
   await setup.getByRole('button', { name: 'Save setup', exact: true }).click();
   expect(await page.evaluate(() => (window as any).__agentTeams.savedControl.workers[0].serviceTier)).toBe('ultrafast');
 });
+
+for (const discovery of ['failed', 'failed missing model', 'missing provider', 'unsupported', 'supported', 'default', 'fast']) test(`named Codex team saves its tier after ${discovery} discovery`, async ({ page }) => {
+  await install(page);
+  await page.evaluate(async discovery => {
+    const { mountAgentTeams } = await import('/src/agent-teams.ts');
+    const state = (window as any).__agentTeams;
+    const worker = { id: 'codex', name: 'GPT-6-Astra · Codex', provider: 'codex' as const, model: 'gpt-6-astra', serviceTier: 'ultrafast' };
+    const setup = { architect: { provider: worker.provider, model: worker.model, reasoningEffort: 'high' }, config: { rosterOnly: true, name: 'Saved Codex', workers: [worker], maxParallel: 1, maxRounds: 8, maxAssignments: 24, workspace: 'shared' as const, summaryLimit: 3072 } };
+    const library = { profiles: [{ id: 'saved', name: 'Saved Codex', setup, updatedAt: 0 }], lastSetup: setup, activeProfileId: null, enabled: false };
+    const model = { id: worker.model, name: 'GPT-6-Astra', description: '' };
+    const host = document.createElement('div'); host.id = 'named-discovery-control'; document.body.append(host);
+    mountAgentTeams(host, {
+      providers: [{ id: 'codex', name: 'Codex', installed: discovery !== 'missing provider', models: discovery === 'failed missing model' ? [] : [model] }] as any,
+      loadModels: async () => {
+        if (discovery.startsWith('failed')) throw new Error('Catalog unavailable');
+        return [{ ...model, speedTiers: discovery === 'unsupported' ? [] : [
+          { id: 'priority', key: 'fast', name: 'Fast', description: 'Fast responses' },
+          { id: 'ultrafast', key: 'ultrafast', name: 'Ultrafast', description: 'Fastest responses' },
+        ] }];
+      },
+      call: async (command, args) => {
+        state.calls.push({ command, args: structuredClone(args) });
+        return structuredClone(library) as any;
+      },
+    });
+  }, discovery);
+  const editor = page.locator('#named-discovery-control');
+  await editor.getByRole('button', { name: 'Edit Saved Codex', exact: true }).click();
+  const row = editor.locator('.agent-team-model[data-key="codex:gpt-6-astra"]');
+  await expect(row.getByRole('checkbox')).toBeChecked();
+  await expect(row.getByRole('radio')).toBeChecked();
+  const speed = row.locator('.agent-team-speed');
+  if (['supported', 'default', 'fast'].includes(discovery)) {
+    await expect(speed).toHaveValue('ultrafast');
+    if (discovery !== 'supported') await speed.selectOption(discovery === 'default' ? '' : discovery);
+  } else await expect(speed).toHaveCount(0);
+  if (discovery === 'unsupported') await expect(row.locator('.agent-team-speed-note')).toContainText('Ultrafast is not available');
+  else await expect.soft(row.locator('.agent-team-speed-note')).toHaveCount(0);
+  await editor.getByRole('button', { name: 'Save team', exact: true }).click();
+  await expect(editor.getByRole('form', { name: 'Agent team', exact: true })).toBeHidden();
+  const { id, setup } = (await calls(page, 'architect_save_profile')).at(-1).args;
+  expect(id).toBe('saved');
+  expect(setup.architect).toMatchObject({ provider: 'codex', model: 'gpt-6-astra', reasoningEffort: 'high' });
+  expect(setup.config.workers).toHaveLength(1);
+  expect(setup.config.workers[0]).toMatchObject({ provider: 'codex', model: 'gpt-6-astra' });
+  if (['unsupported', 'default'].includes(discovery)) expect(setup.config.workers[0]).not.toHaveProperty('serviceTier');
+  else expect(setup.config.workers[0].serviceTier).toBe(discovery === 'fast' ? 'fast' : 'ultrafast');
+});
