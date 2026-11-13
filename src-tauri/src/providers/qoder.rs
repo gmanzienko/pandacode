@@ -94,6 +94,18 @@ async fn request(pipe: &mut Pipe, frame: &Value) -> Result<Value, String> {
     }
 }
 
+/// Attempt remote deletion on a fresh deadline; an ACK does not prove disk residue is gone.
+pub(super) async fn delete_session(pipe: &mut Pipe, id: &str) -> Result<(), String> {
+    const FAILED: &str = "Qoder session cleanup failed: session/delete did not return a matching success result.";
+    pipe.set_deadline_after(CLEANUP);
+    let reply = request(pipe, &json!({"jsonrpc":"2.0","id":9000,"method":"session/delete","params":{"sessionId":id}}))
+        .await.map_err(|_| FAILED.to_owned())?;
+    if reply.get("error").is_some() || !reply.get("result").is_some_and(Value::is_object) {
+        return Err(FAILED.into());
+    }
+    Ok(())
+}
+
 async fn probe(path: &Path) -> Result<(Value, HashMap<String, Value>), String> {
     let cwd = std::env::temp_dir();
     let mut pipe = Pipe::spawn(command(path)?, &cwd, STARTUP)
@@ -103,8 +115,7 @@ async fn probe(path: &Path) -> Result<(Value, HashMap<String, Value>), String> {
     result.map_err(|error| super::diagnostics::failure(&error, pipe.diagnostic()))
 }
 
-/// One session switches through every model in order (each switch answers in
-/// about a millisecond), then is deleted so it never appears in Qoder's history.
+/// One empty session switches through every model, then attempts checked cleanup.
 async fn probe_frames(pipe: &mut Pipe, cwd: &Path) -> Result<(Value, HashMap<String, Value>), String> {
     let init = request(pipe, &initialize()).await?;
     if init.get("error").is_some() {
@@ -141,10 +152,9 @@ async fn probe_frames(pipe: &mut Pipe, cwd: &Path) -> Result<(Value, HashMap<Str
         Ok(())
     }
     .await;
-    // Delete even when the walk failed, so an early error leaves no session behind.
-    pipe.set_deadline_after(CLEANUP);
-    let _ = request(pipe, &json!({"jsonrpc":"2.0","id":9000,"method":"session/delete","params":{"sessionId":id}})).await;
+    let cleanup = delete_session(pipe, id).await;
     walk?;
+    cleanup?;
     Ok((session, efforts))
 }
 
@@ -410,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn a_plan_edit_without_a_reject_option_cancels_the_turn() {
+    fn a_plan_edit_without_a_reject_option_cancels_the_request() {
         let mut p = ready("plan");
         let mut request = permission_request("edit");
         request["params"]["options"] = json!([
@@ -671,6 +681,163 @@ mod tests {
         assert_eq!(error, "This model does not advertise an adjustable reasoning effort. Choose harness settings.");
     }
 
+    // Node is an offline JSON-lines ACP child, also on Windows; it never invokes Qoder.
+    fn fake_child(script: &str) -> (Command, Cleanup) {
+        let dir = std::env::temp_dir().join(format!("pandacode-qoder-fixture-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut command = Command::new("node");
+        let prefix = r#"const fs=require('node:fs');
+const send=x=>{if(x.id===9000 && x.result && !x.error) fs.writeFileSync('delete-ack.json',JSON.stringify(x));console.log(JSON.stringify(x));};
+require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+ const r=JSON.parse(line); fs.appendFileSync('requests.jsonl',line+'\n');
+"#;
+        command.args(["-e", &format!("{prefix}{script}\n}});"), "--"]);
+        (command, Cleanup(dir))
+    }
+
+    fn requests(dir: &Path) -> Vec<Value> {
+        std::fs::read_to_string(dir.join("requests.jsonl")).unwrap().lines()
+            .map(|line| serde_json::from_str(line).unwrap()).collect()
+    }
+
+    #[tokio::test]
+    async fn qoder_cold_spawn_scrubs_sdk_values_after_named_launch() {
+        for provider in ["kimi", "qoder"] {
+            let script = format!(r#"
+if(r.method==='initialize') send({{id:r.id,result:{{protocolVersion:1}}}});
+else if(r.method==='session/new') send({{id:r.id,result:{session}}});
+else if(r.method==='session/set_config_option'||r.method==='session/set_mode') send({{id:r.id,result:{{}}}});
+else if(r.method==='session/prompt') {{
+ fs.writeFileSync('environment.json',JSON.stringify({{
+  QODER_AGENT_SDK_ENTRYPOINT:process.env.QODER_AGENT_SDK_ENTRYPOINT,
+  QODER_SDK_ACCESS_TOKEN:process.env.QODER_SDK_ACCESS_TOKEN,
+  QODER_SDK_AUTH_PAYLOAD_FILE:process.env.QODER_SDK_AUTH_PAYLOAD_FILE,
+  QODER_AUTH_STDIN:process.env.QODER_AUTH_STDIN,
+  QODER_CONFIG_DIR:process.env.QODER_CONFIG_DIR,
+  PANDA_FIXTURE_ORDINARY:process.env.PANDA_FIXTURE_ORDINARY
+ }}));
+ send({{id:r.id,result:{{stopReason:'end_turn'}}}});
+}}
+"#, session=session()["result"]);
+            let (mut child, dir) = fake_child(&script);
+            let mut config = super::super::tests::config(provider);
+            config.cwd = dir.0.clone();
+            super::super::configure_command_with_agents(&mut child, &config, &Default::default(), &Default::default());
+            let mut env: Vec<_> = SDK_ENVIRONMENT.iter().map(|name| (name.to_string(), "fixture-sdk".into())).collect();
+            env.extend([("QODER_CONFIG_DIR".into(), "fixture-config".into()), ("PANDA_FIXTURE_ORDINARY".into(), "ordinary".into())]);
+            crate::connections::Launch { executable: None, args: vec![], env, secrets: vec![] }.apply(&mut child);
+            let (_input, receiver) = tokio::sync::mpsc::unbounded_channel();
+            let result = tokio::time::timeout(Duration::from_secs(5), run_process_with_tools(config, Arc::new(|_| {}), receiver, child, vec![], None)).await;
+            assert!(matches!(result, Ok(Ok(()))), "{provider}: {result:?}");
+            let env: Value = serde_json::from_str(&std::fs::read_to_string(dir.0.join("environment.json")).unwrap()).unwrap();
+            assert_eq!(env.as_object().unwrap().len(), if provider == "qoder" { 2 } else { 6 });
+            for name in SDK_ENVIRONMENT {
+                if provider == "qoder" { assert!(env.get(name).is_none(), "{name} survived named launch"); }
+                else { assert_eq!(env[name], "fixture-sdk", "{name} control"); }
+            }
+            assert_eq!(env["QODER_CONFIG_DIR"], "fixture-config");
+            assert_eq!(env["PANDA_FIXTURE_ORDINARY"], "ordinary");
+        }
+    }
+
+    #[tokio::test]
+    async fn qoder_probe_requires_delete_ack_and_preserves_walk_failure() {
+        let mut failures = vec![];
+        for (case, delete, walk, expected) in [
+            ("success", "send({id:r.id,result:{}})", "send({id:r.id,result:{}})", None),
+            ("delete-error", "send({id:r.id,error:{code:-1,message:'private fixture secret'}})", "send({id:r.id,result:{}})", Some("cleanup")),
+            ("eof", "process.exit(0)", "send({id:r.id,result:{}})", Some("cleanup")),
+            ("missing-result", "send({id:r.id})", "send({id:r.id,result:{}})", Some("cleanup")),
+            ("timeout", "setTimeout(()=>{},5000)", "send({id:r.id,result:{}})", Some("cleanup")),
+            ("wrong-id-then-ack", "send({id:8999,error:{code:-1}});send({id:r.id,result:{}})", "send({id:r.id,result:{}})", None),
+            ("walk-error-delete-error", "send({id:r.id,error:{code:-1,message:'private fixture secret'}})", "send({id:r.id,error:{code:-1,message:'walk failed'}})", Some("model switch")),
+            ("walk-timeout-fresh-delete", "setTimeout(()=>send({id:r.id,result:{}}),100)", "setTimeout(()=>{},5000)", Some("timed out")),
+        ] {
+            let script = format!(r#"
+if(r.method==='initialize') send({{id:r.id,result:{{protocolVersion:1}}}});
+else if(r.method==='session/new') send({{id:r.id,result:{{sessionId:'owned',configOptions:[{{type:'select',id:'model',options:[{{value:'efficient'}}]}}]}}}});
+else if(r.method==='session/set_config_option') {{ {walk}; }}
+else if(r.method==='session/delete') {{ if(r.params.sessionId!=='owned') process.exit(3); {delete}; }}
+"#);
+            let (child, dir) = fake_child(&script);
+            let mut pipe = Pipe::spawn(child, &dir.0, Duration::from_millis(600)).unwrap();
+            let result = probe_frames(&mut pipe, &dir.0).await;
+            pipe.finish().await;
+            let deleted = requests(&dir.0).iter().any(|r| r["method"] == "session/delete" && r["params"]["sessionId"] == "owned");
+            if !deleted { failures.push(format!("{case}: no delete attempted")); }
+            if matches!(case, "success" | "wrong-id-then-ack" | "walk-timeout-fresh-delete") && !dir.0.join("delete-ack.json").is_file() {
+                failures.push(format!("{case}: cleanup ended before the success acknowledgement"));
+            }
+            match (expected, result) {
+                (None, Ok(_)) => {},
+                (Some(expected), Err(error)) if error.contains(expected) && !error.contains("private fixture secret") => {},
+                (expected, result) => failures.push(format!("{case}: expected {expected:?}, got {result:?}")),
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn qoder_command_inspection_checks_cleanup_and_keeps_optional_commands() {
+        let mut failures = vec![];
+        for (case, notifications, created, delete, expected) in [
+            ("before", "before", true, "ack", "commands"),
+            ("after", "after", true, "ack", "commands"),
+            ("none", "none", true, "ack", "empty"),
+            ("wrong-session", "wrong", true, "ack", "empty"),
+            ("delete-error", "after", true, "error", "error"),
+            ("failure-after-create", "bad", true, "ack", "error"),
+            ("no-id", "none", false, "ack", "error"),
+        ] {
+            let script = format!(r#"
+if(r.method==='initialize') send({{id:r.id,result:{{protocolVersion:1}}}});
+else if(r.method==='session/new') {{
+ const update={{method:'session/update',params:{{sessionId:'owned',update:{{sessionUpdate:'available_commands_update',availableCommands:[{{name:'fixture'}}]}}}}}};
+ if('{notifications}'==='before') send(update);
+ send({{id:r.id,result:{{sessionId:{id}}}}});
+ if('{notifications}'==='after') send(update);
+ if('{notifications}'==='wrong') {{update.params.sessionId='other';send(update);}}
+ if('{notifications}'==='bad') send({{id:2,error:{{code:-1,message:'later session failure'}}}});
+}}
+else if(r.method==='session/delete') {{
+ if(r.params.sessionId!=='owned') process.exit(3);
+ send('{delete}'==='ack'?{{id:r.id,result:{{}}}}:{{id:r.id,error:{{code:-1,message:'private fixture secret'}}}});
+}}
+"#, id=if created { "'owned'" } else { "null" });
+            let (child, dir) = fake_child(&script);
+            let result = acp::inspect_with(child, &dir.0, true, false, true).await;
+            let deletes: Vec<_> = requests(&dir.0).into_iter().filter(|r| r["method"] == "session/delete").collect();
+            if deletes.len() != usize::from(created) { failures.push(format!("{case}: {} deletes", deletes.len())); }
+            match (expected, result) {
+                ("commands", Ok((_, Some(_)))) | ("empty", Ok((_, None))) => {},
+                ("error", Err(error)) if !error.contains("private fixture secret") => {},
+                (_, result) => failures.push(format!("{case}: {result:?}")),
+            }
+        }
+        // Public generic inspector must continue without deleting non-Qoder sessions.
+        let (child, dir) = fake_child("if(r.method==='initialize') send({id:r.id,result:{protocolVersion:1}}); else if(r.method==='session/new') send({id:r.id,result:{sessionId:'other'}}); else process.exit(9);");
+        assert!(acp::inspect(child, &dir.0, false).await.is_ok());
+        assert!(!requests(&dir.0).iter().any(|r| r["method"] == "session/delete"));
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn plan_declines_missing_null_and_unrecognized_permission_kinds() {
+        for kind in [None, Some(Value::Null), Some(json!("Read")), Some(json!("unexpected")), Some(json!(17))] {
+            for reject in [true, false] {
+                let mut p = ready("plan");
+                let mut request = permission_request("edit");
+                let tool = request["params"]["toolCall"].as_object_mut().unwrap();
+                if let Some(kind) = &kind { tool.insert("kind".into(), kind.clone()); } else { tool.remove("kind"); }
+                if !reject { request["params"]["options"].as_array_mut().unwrap().retain(|o| o["kind"] != "reject_once"); }
+                let step = p.acp(request).unwrap();
+                assert_eq!(step.write[0]["result"]["outcome"], if reject { json!({"outcome":"selected","optionId":"cancel"}) } else { json!({"outcome":"cancelled"}) });
+                assert!(step.events.iter().any(|e| e.kind == "status" && e.text.starts_with("Plan mode declined:")));
+                assert!(!step.events.iter().any(|e| e.kind == "approval"));
+            }
+        }
+    }
+
     #[tokio::test]
     #[ignore = "requires an installed, signed-in Qoder CLI; reads the catalog only"]
     async fn installed_qoder_lists_models_with_efforts() {
@@ -699,63 +866,102 @@ mod tests {
         let path = executable("qoder").expect("Install Qoder CLI first");
         // Unique per run, so the resumed turn can only get it from the file or the session.
         let word = format!("PANDA-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos() % 100_000);
-        let turn = |prompt: String, resume: Option<String>| {
-            let mut config = super::super::tests::config("qoder");
-            config.session_id = "qoder-live-resume".into();
-            config.cwd = cwd.clone();
-            config.model = "efficient".into();
-            config.prompt = prompt;
-            config.resume_id = resume;
-            let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
-            let seen = events.clone();
-            let (input, receiver) = tokio::sync::mpsc::unbounded_channel::<RunInput>();
-            let approvals = input.clone();
-            let sink: Sink = Arc::new(move |event| {
-                if event.kind == "approval" {
-                    if let Some(request_id) = event.request_id.clone() {
-                        let _ = approvals.send(RunInput::Approval { request_id, approved: true });
-                    }
-                }
-                seen.lock().unwrap().push(event);
-            });
-            let mut command = super::super::provider_command("qoder", &path).unwrap();
-            super::super::configure_command(&mut command, &config);
-            async move {
-                // A closed input channel means Stop; hold it open for the turn.
-                let _input = input;
-                let run = run_process_with_tools(config, sink, receiver, command, Vec::new(), None);
-                let limit = tokio::time::Duration::from_secs(180);
-                let result = tokio::time::timeout(limit, run).await.map_err(|_| "the turn timed out".to_string()).and_then(|r| r);
-                (events.lock().unwrap().clone(), result)
-            }
-        };
         let text = |events: &[AgentEvent]| events.iter().filter(|e| e.kind == "text" || e.kind == "delta").map(|e| e.text.as_str()).collect::<String>();
-        let (first, outcome) = turn(format!("Create a file named panda.txt in the current directory containing exactly this word: {word}. Use your file-writing tool, then reply with the word."), None).await;
-        outcome.expect("the first turn should finish");
-        let session = first.iter().find(|event| event.kind == "session").expect("a session id").text.clone();
-        let (second, outcome) = turn("Read panda.txt with your file-reading tool and reply with exactly the word it contains.".into(), Some(session.clone())).await;
-        // Delete before asserting, so a failed assertion still leaves no Qoder history.
-        let mut pipe = Pipe::spawn(command(&path).unwrap(), &cwd, STARTUP).unwrap();
-        pipe.send(&initialize()).await.unwrap();
-        pipe.send(&json!({"jsonrpc":"2.0","id":2,"method":"session/delete","params":{"sessionId":session.clone()}})).await.unwrap();
-        while let Ok(frame) = pipe.read().await {
-            if frame["id"] == 2 {
-                assert!(frame.get("error").is_none(), "{frame}");
-                break;
-            }
-        }
-        pipe.finish().await;
-        outcome.expect("the resumed turn should finish");
+        let (first, first_outcome) = live_turn(&path, &cwd, "auto", format!("Create a file named panda.txt in the current directory containing exactly this word: {word}. Use your file-writing tool, then reply with the word."), None).await;
+        let session = first.iter().find(|event| event.kind == "session").map(|event| event.text.clone());
+        let (second, outcome) = if let Some(session) = session.as_ref().filter(|_| first_outcome.is_ok()) {
+            live_turn(&path, &cwd, "auto", "Read panda.txt with your file-reading tool and reply with exactly the word it contains.".into(), Some(session.clone())).await
+        } else {
+            (Vec::new(), Err("Resume skipped because the first turn failed or returned no session ID.".into()))
+        };
+        let cleanup = cleanup_live_sessions(&path, &cwd, first.iter().chain(second.iter())).await;
+        // Assert only after attempting checked cleanup for every captured ID.
+        assert!(first_outcome.is_ok(), "the first turn should finish");
+        assert!(outcome.is_ok(), "the resumed turn should finish");
+        cleanup.expect("all test-owned sessions should acknowledge deletion");
+        let session = session.expect("a session id");
         let written = std::fs::read_to_string(cwd.join("panda.txt")).expect("the first turn should have written panda.txt");
-        assert!(written.contains(&word), "{written:?}");
+        assert!(written.contains(&word), "the file should contain the expected word");
         assert!(first.iter().any(|event| event.tool.is_some()), "the first turn should have called a tool");
-        assert!(text(&first).contains(&word), "{:?}", first.iter().map(|e| (&e.kind, &e.text)).collect::<Vec<_>>());
+        assert!(text(&first).contains(&word), "the first response should contain the expected word");
         assert_eq!(second.iter().find(|event| event.kind == "session").expect("a session id").text, session, "resume must reuse the saved session");
         assert!(second.iter().any(|event| event.tool.is_some()), "the resumed turn should have called a tool");
-        assert!(text(&second).contains(&word), "{:?}", second.iter().map(|e| (&e.kind, &e.text)).collect::<Vec<_>>());
+        assert!(text(&second).contains(&word), "the resumed response should contain the expected word");
         for event in first.iter().chain(second.iter()) {
             assert!(!event.text.contains("Bearer "), "a run must never surface the host token");
         }
+    }
+
+    async fn live_turn(path: &Path, cwd: &Path, mode: &str, prompt: String, resume: Option<String>) -> (Vec<AgentEvent>, Result<(), String>) {
+        let mut config = super::super::tests::config("qoder");
+        config.session_id = "qoder-live-smoke".into();
+        config.cwd = cwd.to_owned();
+        config.mode = mode.into();
+        config.model = "efficient".into();
+        config.prompt = prompt;
+        config.resume_id = resume;
+        let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
+        let seen = events.clone();
+        // Hold input open; unexpected approvals receive no manual auto-approval.
+        let (_input, receiver) = tokio::sync::mpsc::unbounded_channel::<RunInput>();
+        let sink: Sink = Arc::new(move |event| seen.lock().unwrap().push(event));
+        let mut command = super::super::provider_command("qoder", path).unwrap();
+        super::super::configure_command(&mut command, &config);
+        command.env("TMPDIR", cwd).env("TEMP", cwd).env("TMP", cwd);
+        let result = tokio::time::timeout(Duration::from_secs(180), run_process_with_tools(config, sink, receiver, command, Vec::new(), None))
+            .await.map_err(|_| "the turn timed out".to_string()).and_then(|r| r);
+        let captured = events.lock().unwrap().clone();
+        (captured, result)
+    }
+
+    async fn cleanup_live_sessions<'a>(path: &Path, cwd: &Path, events: impl Iterator<Item = &'a AgentEvent>) -> Result<(), String> {
+        let ids: HashSet<_> = events.filter(|e| e.kind == "session" && !e.text.is_empty() && e.text.len() <= 256)
+            .map(|e| e.text.clone()).collect();
+        if ids.is_empty() { return Err("No test-owned session ID was captured; cleanup could not be attempted.".into()); }
+        let mut errors = Vec::new();
+        for id in ids {
+            let result = async {
+                let mut child = command(path)?;
+                child.env("TMPDIR", cwd).env("TEMP", cwd).env("TMP", cwd);
+                let mut pipe = Pipe::spawn(child, cwd, STARTUP).map_err(|_| "Could not start session cleanup.".to_owned())?;
+                let result = async {
+                    let init = request(&mut pipe, &super::initialize()).await?;
+                    if init.get("error").is_some() || init["result"]["protocolVersion"] != 1 {
+                        return Err("Could not initialize session cleanup.".into());
+                    }
+                    delete_session(&mut pipe, &id).await
+                }.await;
+                pipe.finish().await;
+                result
+            }.await;
+            if let Err(error) = result { errors.push(error); }
+        }
+        if errors.is_empty() { Ok(()) } else { Err(errors.join("\n")) }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an installed, signed-in Qoder CLI; sends one short Plan write request"]
+    async fn installed_qoder_plan_refuses_write() {
+        super::super::widen_process_path();
+        let dir = std::env::temp_dir().join(format!("pandacode-qoder-plan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.canonicalize().unwrap();
+        let _cleanup = Cleanup(cwd.clone());
+        crate::secret_store::setup(&cwd);
+        let init = std::process::Command::new("git").args(["init", "-q"]).current_dir(&cwd).stdin(Stdio::null()).output().expect("git init");
+        assert!(init.status.success(), "git init failed in the throwaway repo");
+        std::fs::write(cwd.join("sentinel.txt"), "KEEP\n").unwrap();
+        assert!(!cwd.join("plan-target.txt").exists());
+        let path = executable("qoder").expect("Install Qoder CLI first");
+        let (events, outcome) = live_turn(&path, &cwd, "plan", "Use your file-writing tool to overwrite sentinel.txt with CHANGED and create plan-target.txt containing CHANGED.".into(), None).await;
+        let cleanup = cleanup_live_sessions(&path, &cwd, events.iter()).await;
+        assert!(outcome.is_ok(), "the Plan turn should finish");
+        cleanup.expect("all test-owned sessions should acknowledge deletion");
+        assert_eq!(std::fs::read_to_string(cwd.join("sentinel.txt")).unwrap(), "KEEP\n");
+        assert!(!cwd.join("plan-target.txt").exists());
+        assert!(events.iter().any(|e| e.kind == "status" && e.text.starts_with("Plan mode declined:")),
+            "inconclusive: no actual Plan decline event; a text-only refusal does not prove enforcement");
+        assert!(!events.iter().any(|e| e.kind == "approval"), "Plan must not need manual approval");
     }
 
     /// Removes the throwaway repo when the test ends, pass or fail.

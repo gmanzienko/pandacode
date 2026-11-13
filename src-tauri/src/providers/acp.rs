@@ -944,7 +944,7 @@ pub(super) async fn grok_models(path: &Path) -> Result<Vec<ModelInfo>, String> {
     }
     let mut command = super::provider_command("grok", path)?;
     command.args(["--no-auto-update", "agent", "stdio"]);
-    let (metadata, _) = inspect_with(command, &std::env::temp_dir(), false, true).await?;
+    let (metadata, _) = inspect_with(command, &std::env::temp_dir(), false, true, false).await?;
     Ok(parse_models(&metadata))
 }
 
@@ -1105,18 +1105,20 @@ pub(crate) async fn inspect(
     cwd: &Path,
     wait_commands: bool,
 ) -> Result<(Value, Option<Value>), String> {
-    inspect_with(command, cwd, wait_commands, false).await
+    inspect_with(command, cwd, wait_commands, false, false).await
 }
 
 /// `authenticate` runs between `initialize` and `session/new` when the server
 /// advertises cached credentials (Grok Build refuses sessions without it).
+/// Only Qoder opts into checked deletion of the empty discovery session.
 pub(crate) async fn inspect_with(
     command: Command,
     cwd: &Path,
     wait_commands: bool,
     authenticate: bool,
+    qoder_cleanup: bool,
 ) -> Result<(Value, Option<Value>), String> {
-    inspect_state(command, cwd, wait_commands, authenticate, DISCOVERY_STARTUP, COMMAND_GRACE)
+    inspect_state(command, cwd, wait_commands, authenticate, qoder_cleanup, DISCOVERY_STARTUP, COMMAND_GRACE)
         .await.map_err(|failure| failure.message)
 }
 
@@ -1132,6 +1134,7 @@ async fn inspect_state(
     cwd: &Path,
     wait_commands: bool,
     authenticate: bool,
+    qoder_cleanup: bool,
     startup_timeout: Duration,
     command_grace: Duration,
 ) -> Result<(Value, Option<Value>), DiscoveryFailure> {
@@ -1140,6 +1143,7 @@ async fn inspect_state(
     let mut acp_ready = false;
     let mut authentication_required = false;
     let mut stage = "initialize";
+    let mut session_id = None;
     let result: Result<(Value, Option<Value>), String> = async {
         pipe.send(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"pandacode","version":"0.1.0"}}})).await.map_err(|_| transport_error(&pipe, stage))?;
         let mut metadata = None;
@@ -1181,6 +1185,7 @@ async fn inspect_state(
                 if !frame["result"]["sessionId"].as_str().is_some_and(|id| !id.is_empty() && id.len() <= 256) {
                     return Err("ACP session/new did not return a valid session ID.".into());
                 }
+                session_id = frame["result"]["sessionId"].as_str().map(str::to_owned);
                 metadata = Some(frame["result"].clone());
                 pipe.set_deadline_after(command_grace);
             } else if frame["method"] == "session/update" && frame["params"]["update"]["sessionUpdate"] == "available_commands_update" {
@@ -1192,6 +1197,11 @@ async fn inspect_state(
             }
         }
     }.await;
+    let cleanup = match session_id.filter(|_| qoder_cleanup) {
+        Some(id) => super::qoder::delete_session(&mut pipe, &id).await,
+        None => Ok(()),
+    };
+    let result = result.and_then(|value| cleanup.map(|()| value));
     pipe.finish().await;
     result.map_err(|error| DiscoveryFailure {
         acp_ready,
@@ -1236,7 +1246,7 @@ pub async fn provider_check_connection(provider: String) -> Result<ConnectionSta
     antigravity_args(&mut command);
     let discovery = super::acp_catalog::begin("antigravity", &path);
     let _temp = super::AgentTemp::redirect(&mut command);
-    let result = inspect_state(command, &std::env::temp_dir(), false, false, DISCOVERY_STARTUP, COMMAND_GRACE).await;
+    let result = inspect_state(command, &std::env::temp_dir(), false, false, false, DISCOVERY_STARTUP, COMMAND_GRACE).await;
     if let Ok((metadata, _)) = &result { super::acp_catalog::store(discovery, metadata); }
     Ok(connection_status(result))
 }
@@ -1414,7 +1424,7 @@ mod tests {
             read -r forbidden
         "#);
         let start = std::time::Instant::now();
-        let (metadata, commands) = inspect_state(command, &std::env::temp_dir(), true, false, Duration::from_secs(2), Duration::from_millis(20)).await.unwrap();
+        let (metadata, commands) = inspect_state(command, &std::env::temp_dir(), true, false, false, Duration::from_secs(2), Duration::from_millis(20)).await.unwrap();
         assert_eq!(metadata["sessionId"], "fixture");
         assert!(parse_models(&metadata).iter().any(|model| model.id == "model-fixture"));
         assert!(commands.is_none());
@@ -1432,7 +1442,7 @@ mod tests {
         ] {
             let startup = if acp_ready { "read -r init; printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1}}';" } else { "" };
             let command = fixture(&format!("{startup} read -r request; printf '%s\\n' '{reply}'; read -r forbidden"));
-            let status = connection_status(inspect_state(command, &std::env::temp_dir(), false, false, Duration::from_secs(2), Duration::from_millis(20)).await);
+            let status = connection_status(inspect_state(command, &std::env::temp_dir(), false, false, false, Duration::from_secs(2), Duration::from_millis(20)).await);
             assert_eq!(status.state, state);
             assert!(status.installed);
             assert_eq!(status.acp_ready, acp_ready);
@@ -1443,10 +1453,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn readiness_reports_timeout_and_stderr_cause_without_credentials() {
-        let failure = inspect_state(fixture("read -r init; sleep 2"), &std::env::temp_dir(), false, false, Duration::from_millis(20), COMMAND_GRACE).await.unwrap_err();
+        let failure = inspect_state(fixture("read -r init; sleep 2"), &std::env::temp_dir(), false, false, false, Duration::from_millis(20), COMMAND_GRACE).await.unwrap_err();
         assert_eq!(failure.message, ACP_STARTUP_TIMEOUT);
         assert!(!failure.acp_ready);
-        let failure = inspect_state(fixture("printf '%s\\n' 'FutureWarning: Python is deprecated' 'Authorization: Bearer fixture-secret' 'ValueError: invalid cwd' >&2; exit 1"), &std::env::temp_dir(), false, false, Duration::from_secs(2), COMMAND_GRACE).await.unwrap_err();
+        let failure = inspect_state(fixture("printf '%s\\n' 'FutureWarning: Python is deprecated' 'Authorization: Bearer fixture-secret' 'ValueError: invalid cwd' >&2; exit 1"), &std::env::temp_dir(), false, false, false, Duration::from_secs(2), COMMAND_GRACE).await.unwrap_err();
         assert!(failure.message.contains("ValueError: invalid cwd"));
         assert!(!failure.message.contains("fixture-secret"));
     }
@@ -1466,7 +1476,7 @@ mod tests {
             printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"ready"}}'
             read -r forbidden
         "#);
-        let status = connection_status(inspect_state(command, &std::env::temp_dir(), false, false, Duration::from_secs(2), COMMAND_GRACE).await);
+        let status = connection_status(inspect_state(command, &std::env::temp_dir(), false, false, false, Duration::from_secs(2), COMMAND_GRACE).await);
         assert_eq!(status.state, "ready");
     }
 
