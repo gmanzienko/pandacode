@@ -449,12 +449,12 @@ test('the Speed row lists a model\'s tiers and saves the choice', async ({ page 
 
   await pick(page, 'astra', 'Codex · GPT-6-Astra');
   await trigger(page).click();
-  await expect(speed(page).getByRole('radio')).toHaveText(['Standard', 'Fast', 'Ultra Fast']);
+  await expect(speed(page).getByRole('radio')).toHaveText(['Standard', 'Fast', 'Ultrafast']);
   await expect(speed(page).getByRole('radio', { name: 'Standard', exact: true })).toHaveAttribute('aria-checked', 'true');
-  await speed(page).getByRole('radio', { name: 'Ultra Fast', exact: true }).click();
-  await expect(speed(page).getByRole('radio', { name: 'Ultra Fast', exact: true })).toHaveAttribute('aria-checked', 'true');
+  await speed(page).getByRole('radio', { name: 'Ultrafast', exact: true }).click();
+  await expect(speed(page).getByRole('radio', { name: 'Ultrafast', exact: true })).toHaveAttribute('aria-checked', 'true');
   await expect.poll(async () => (await task(page)).codexSettings?.serviceTier).toBe('ultrafast');
-  await expect(trigger(page).locator('.model-effort')).toHaveText('Ultra Fast');
+  await expect(trigger(page).locator('.model-effort')).toHaveText('Ultrafast');
   // Arrow keys stay inside the Speed group and save.
   await page.keyboard.press('ArrowLeft');
   await expect.poll(async () => (await task(page)).codexSettings?.serviceTier).toBe('priority');

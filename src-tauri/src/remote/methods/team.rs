@@ -106,7 +106,7 @@ pub(crate) fn build_catalog(harnesses: &[Harness]) -> (Vec<WorkerProfile>, Vec<W
             }
             taken.insert(id.clone());
             let label = if name.trim().is_empty() { model.as_str() } else { name.as_str() };
-            let profile = WorkerProfile { id, name: clip_bytes(&format!("{label} · {}", harness.name), NAME_BYTES), provider: harness.id.clone(), model: model.clone(), reasoning_effort: None };
+            let profile = WorkerProfile { id, name: clip_bytes(&format!("{label} · {}", harness.name), NAME_BYTES), provider: harness.id.clone(), model: model.clone(), reasoning_effort: None, service_tier: None };
             by_key.insert((harness.id.clone(), model.clone()), catalog.len());
             catalog.push(profile);
         }

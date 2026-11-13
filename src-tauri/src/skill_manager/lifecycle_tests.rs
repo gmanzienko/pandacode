@@ -151,6 +151,7 @@ fn skill_manager_switches_for_removed_skills_are_listed_and_can_be_cleared() {
 fn skill_manager_ask_only_reminder_skips_slash_command_turns() {
     let disabled = BTreeSet::from(["review".into()]);
     let config = |provider: &str, prompt: &str| crate::providers::RunConfig {
+        required_tier: None,
         session_id: "slash".into(),
         provider: provider.into(),
         model: "default".into(),

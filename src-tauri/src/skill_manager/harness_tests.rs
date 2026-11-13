@@ -116,6 +116,7 @@ fn skill_manager_switchable_and_off_explicit_invocation() {
     );
     assert!(!items[0].switchable);
     let mut config = crate::providers::RunConfig {
+        required_tier: None,
         session_id: "s".into(),
         provider: "codex".into(),
         model: "default".into(),

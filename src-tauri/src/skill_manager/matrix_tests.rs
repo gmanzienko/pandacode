@@ -3,6 +3,7 @@ use super::*;
 
 fn config(provider: &str, prompt: &str) -> crate::providers::RunConfig {
     crate::providers::RunConfig {
+        required_tier: None,
         session_id: "skill-guard".into(),
         provider: provider.into(),
         model: "default".into(),
