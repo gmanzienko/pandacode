@@ -4031,6 +4031,10 @@ async fn run_process_with_tools(
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
+        // Named connections apply their environment after provider configuration.
+        if config.provider == "qoder" {
+            qoder::scrub_sdk_environment(&mut command);
+        }
         let child = command
             .spawn()
             .map_err(|e| format!("Could not start {}: {e}", config.provider))?;

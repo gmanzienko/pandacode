@@ -1145,10 +1145,16 @@ the spawning app's SDK identity and auth payload.
 
 **Models and effort.** `session/new` advertises fifteen models with opaque ids
 (`auto`, `ultimate`, `efficient`, `smodel`, …) beside their display names. Discovery
-opens one empty session, switches through every model in order (each switch answers in
-about a millisecond) to read that model's `reasoning_effort` choices, then deletes the
-session even if a switch fails; no prompt is sent and no inference runs. The effort
-option shares the `model` category, so it is matched by its exact id. Thirteen models
+opens one empty session and switches through every model in order to read that model's
+`reasoning_effort` choices. After a valid session ID is returned, cleanup is attempted
+even if a switch fails, with a fresh two-second deadline and a required matching
+successful `session/delete` reply. Failed cleanup fails discovery and prevents caching
+the catalog; if the model walk also failed, its original error is retained. Command
+discovery uses the same checked cleanup. A dead transport can prevent deletion, and
+an acknowledgement does not prove all history or disk residue was removed. No prompt
+is sent and no inference runs.
+
+The effort option shares the `model` category, so it is matched by its exact id. Thirteen models
 advertise efforts; `auto` and `efficient` advertise none, and an effort chosen for a
 model that advertises none fails the turn (“This model does not advertise an adjustable
 reasoning effort. Choose harness settings.”). Default leaves selection to Qoder. Qoder
@@ -1223,7 +1229,12 @@ Verified against `qodercli` 1.1.13 on 2026-11-11 by driving `qodercli --acp` dir
 config-root precedence was read from the installed bundle on 2026-11-12 without
 launching it. The recorded frames back the unit tests in `providers/qoder.rs`, and an
 ignored smoke test (`installed_qoder_lists_models_with_efforts`) reads the real catalog
-without prompting.
+without prompting. The ignored resume smoke test sends at most two prompts, and
+`installed_qoder_plan_refuses_write` sends one write request in Plan mode. Both collect
+test-owned session IDs from events and attempt checked deletion before assertions,
+including after a failed or timed-out turn. The Plan test requires an actual decline
+event plus an unchanged sentinel and absent target; a text-only refusal is inconclusive.
+These live tests have not been rerun as part of the offline cleanup fix.
 
 ## Muse Code
 

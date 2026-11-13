@@ -51,7 +51,7 @@ pub(super) async fn discover(provider: &str, cwd: &Path) -> Result<Catalog, Stri
         }
     }
     let discovery = crate::providers::acp_catalog::begin(provider, &path);
-    let (metadata, frame) = crate::providers::acp::inspect_with(command, cwd, true, provider == "grok").await?;
+    let (metadata, frame) = crate::providers::acp::inspect_with(command, cwd, true, provider == "grok", provider == "qoder").await?;
     // Model choices can be reused by the model picker, even when this session
     // never advertises commands. Commands themselves remain scoped to cwd.
     crate::providers::acp_catalog::store(discovery, &metadata);
