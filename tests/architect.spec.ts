@@ -2188,6 +2188,33 @@ test.describe('workers full access note', () => {
   });
 });
 
+// Force real wrapping using this host's rendered pair widths, while leaving each pair room to fit.
+async function expectWrappedKeyHint(hint: Locator): Promise<void> {
+  await hint.evaluate(element => {
+    const style = getComputedStyle(element);
+    const pairWidth = Math.max(...[...element.querySelectorAll(':scope > span')].map(span => span.getBoundingClientRect().width));
+    const padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+    const border = parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth);
+    (element as HTMLElement).style.width = `${Math.ceil(pairWidth) + (style.boxSizing === 'border-box' ? padding + border : 0)}px`;
+  });
+  const layout = await hint.evaluate(element => {
+    const style = getComputedStyle(element);
+    const pairs = [...element.querySelectorAll(':scope > span')];
+    return {
+      pairs: pairs.map(span => span.textContent), lines: pairs.map(span => span.getClientRects().length),
+      tops: new Set(pairs.map(span => Math.round(span.getBoundingClientRect().top))).size,
+      cut: element.scrollWidth > element.clientWidth, ellipsis: style.textOverflow === 'ellipsis',
+      below: element.getBoundingClientRect().top >= element.parentElement!.querySelector('.architect-worker-list')!.getBoundingClientRect().bottom - 0.5,
+    };
+  });
+  expect(layout.pairs).toEqual(['↑↓ move', '→ shows details', '← hides', 'Enter opens']);
+  expect(layout.lines).toEqual([1, 1, 1, 1]);
+  expect(layout.tops).toBeGreaterThanOrEqual(2);
+  expect(layout.cut).toBe(false);
+  expect(layout.ellipsis).toBe(false);
+  expect(layout.below).toBe(true);
+}
+
 test.describe('workers key hint', () => {
   for (const width of [320, 400]) test(`a ${width}px flyout wraps the key hint rather than cutting it`, async ({ page }) => {
     await installArchitect(page, { 'session-2': team('session-2', { workers: [worker('build', { status: 'running' }), worker('review', { status: 'queued', dependsOn: ['build'] })] }) });
@@ -2206,7 +2233,7 @@ test.describe('workers key hint', () => {
     expect(box.cut).toBe(false);
     expect(box.ellipsis).toBe(false);
     expect(box.below).toBe(true);
-    if (width === 320) expect(box.lines).toBeGreaterThanOrEqual(2);
+    if (width === 320) await expectWrappedKeyHint(hint);
   });
 });
 
@@ -2734,8 +2761,8 @@ test.describe('access mark hit area, key hint pairs, pinned tip, error tones', (
     });
     expect(layout.pairs).toEqual(['↑↓ move', '→ shows details', '← hides', 'Enter opens']);
     expect(layout.lines).toEqual([1, 1, 1, 1]);
-    // It does wrap at this width (so the check above is a real one).
-    expect(layout.tops).toBeGreaterThanOrEqual(2);
+    // Check the same pairs under measured pressure even when the host font fits one line at 320px.
+    await expectWrappedKeyHint(hint);
   });
   test('a pinned tip opens below its mark and leaves the heading\'s buttons clear', async ({ page }) => {
     const mark = await standardTeam(page);
