@@ -372,7 +372,14 @@ impl Protocol {
                         self.remote_id.clone()
                     };
                     step.events.push(self.event("session", saved, None));
-                    self.acp_mode(&mut step)?;
+                    if self.config.provider == "qoder" {
+                        // Keep the owned session ID available for cleanup even if setup fails.
+                        if let Err(error) = self.acp_mode(&mut step) {
+                            step.failure = Some(error);
+                        }
+                    } else {
+                        self.acp_mode(&mut step)?;
+                    }
                 }
                 4 => {
                     self.acp_update_config(result);
@@ -709,7 +716,11 @@ impl Protocol {
         } else if self.config.provider == "kilo" {
             &[super::kilo::mode_id(&self.config.mode)]
         } else if self.config.provider == "qoder" {
-            &[super::qoder::mode_id(&self.config.mode)]
+            if self.config.mode == "full" {
+                &["bypassPermissions", "yolo"]
+            } else {
+                &[super::qoder::mode_id(&self.config.mode)]
+            }
         } else if self.config.provider == "devin" {
             &[super::devin::mode_id(&self.config.mode)]
         } else if self.config.provider == "hermes" {

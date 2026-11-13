@@ -35,7 +35,7 @@ Full access maps to the following supported native mechanisms:
 | Antigravity | Accepts the offered ACP one-time tool permission; the server's own policy remains authoritative |
 | Devin CLI | Its ACP `bypass` session mode; a request that still arrives (organization policy) is answered `allow_once`, never a standing grant. Implementing a plan always asks |
 | ZCode | Its `yolo` session mode, set per run; a permission request that still arrives is answered with the offered one-time allow. A request that offers only a lasting allow (such as `allow_project`) is never answered automatically: it asks a person, and a team worker declines it with a plain deny |
-| Qoder | Its ACP `bypassPermissions` session mode; a request that still arrives is answered with the offered `proceed_once`, never a standing grant |
+| Qoder | Its explicitly advertised ACP `bypassPermissions` or `yolo` session mode; a request that still arrives is answered with the offered `proceed_once`, never a standing grant |
 
 Antigravity has no universal ACP setting that can disable server-side sandboxing
 or managed restrictions. PandaCode does not invent one. Structured questions still
@@ -98,9 +98,13 @@ requests, including commands and edits to planning files; a missing rejection
 option cancels the request. Full access runs tools without approval prompts.
 This is an ACP tool policy, not a filesystem or network sandbox.
 
-Qoder's four ACP session modes are its permission modes, so each PandaCode choice maps
-1:1: Standard is `default`, Accept edits `acceptEdits`, Plan `plan`, and Full access
-`bypassPermissions`; a mode it stops advertising fails the turn. Read, search, fetch and
+Qoder's ACP session modes are its permission modes. Standard is `default`, Accept
+edits `acceptEdits`, Plan `plan`, and Full access the explicitly advertised
+`bypassPermissions` or `yolo`, preferring the former when both are offered. No other
+Full fallback is used. The recorded 1.1.13 modes include `plan` and
+`bypassPermissions`; installed 1.1.88's static choices instead include `yolo` and omit
+`plan`. Missing Plan fails closed before model selection or prompting. The `yolo`
+compatibility is tested offline, without a live Full turn. Read, search, fetch and
 think requests are allowed in every mode. Standard asks before edits, commands and other
 tools. Accept edits approves edit requests that still ask through the shared ACP path;
 commands still ask you. Plan is Qoder's native `plan` mode, which does not refuse writes
@@ -153,7 +157,7 @@ Plan mode blocks implementation, not research. Per harness:
 | Cline | Plan mode also allows `fetch` requests; edits, deletes and moves are declined, commands ask. |
 | GitHub Copilot | `fetch` joins read and search on the ordinary approval path; other requests are declined. |
 | Grok | Read, search, fetch and think requests were already allowed. |
-| Qoder | Read, search, fetch and think requests are allowed; PandaCode declines every other request, since Qoder's native `plan` mode does not gate writes itself. |
+| Qoder | Requires an advertised `plan` mode; otherwise setup fails before prompting. When supported, read, search, fetch and think requests are allowed; PandaCode declines every other request, since the recorded native `plan` mode does not gate writes itself. |
 | Pi / omp | `read`, `grep`, `find`, `ls` run anywhere; Pi has no web tools. |
 | DeepSeek, Muse, Command Code, Kimi | Unchanged: their native read-only/plan modes decide. |
 

@@ -1,4 +1,4 @@
-//! Qoder (`qodercli --acp`) shares the ACP transport. Its four session modes are
+//! Qoder (`qodercli --acp`) shares the ACP transport. Its advertised session modes are
 //! its permission modes, and models that support it report their own reasoning
 //! efforts. Credentials stay with the installed Qoder CLI.
 use super::*;
@@ -286,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn every_pandacode_mode_has_exactly_one_qoder_mode() {
+    fn pandacode_modes_keep_the_historical_qoder_mode_ids() {
         assert_eq!(mode_id("ask"), "default");
         assert_eq!(mode_id("auto"), "acceptEdits");
         assert_eq!(mode_id("plan"), "plan");
@@ -441,8 +441,80 @@ mod tests {
         unsupported["result"]["configOptions"][0]["options"] = json!([
             {"value":"default","name":"Default","description":"Prompts for approval"}]);
         unsupported["result"]["modes"]["availableModes"] = json!([{"id":"default","name":"Default"}]);
-        let error = p.acp(unsupported).err().unwrap();
+        let error = p.acp(unsupported).unwrap().failure.unwrap();
         assert_eq!(error, "This harness does not advertise the selected task mode.");
+    }
+
+    /// Synthetic fixtures use the mode IDs defined in the installed 1.1.88 bundle,
+    /// not a new live recording. Exercise both ACP configuration shapes.
+    #[test]
+    fn full_uses_only_an_advertised_equivalent_permission_mode() {
+        for config_options in [true, false] {
+            for (offered, expected) in [
+                (vec!["yolo"], Some("yolo")),
+                (vec!["bypassPermissions"], Some("bypassPermissions")),
+                (vec!["yolo", "bypassPermissions"], Some("bypassPermissions")),
+                (vec!["default", "acceptEdits", "auto", "dontAsk"], None),
+                (vec!["unexpected"], None),
+                (vec![], None),
+            ] {
+                let mut cfg = super::super::tests::config("qoder");
+                cfg.mode = "full".into();
+                let mut p = Protocol::new(cfg);
+                p.receive(initialize()).unwrap();
+                let mut frame = session();
+                frame["result"]["modes"]["availableModes"] = json!(offered.iter().map(|id| json!({"id":id})).collect::<Vec<_>>());
+                frame["result"]["modes"]["currentModeId"] = json!("unexpected");
+                frame["result"]["configOptions"][0]["options"] = json!(offered.iter().map(|id| json!({"value":id})).collect::<Vec<_>>());
+                frame["result"]["configOptions"][0]["currentValue"] = json!("unexpected");
+                if !config_options { frame["result"].as_object_mut().unwrap().remove("configOptions"); }
+                match (expected, p.receive(frame)) {
+                    (Some(expected), Ok(step)) => {
+                        assert!(step.failure.is_none());
+                        assert_eq!(step.write.len(), 1);
+                        let request = &step.write[0];
+                        assert_eq!(request["method"], if config_options { "session/set_config_option" } else { "session/set_mode" });
+                        assert_eq!(request["params"][if config_options { "value" } else { "modeId" }], expected);
+                        let permission = p.receive(permission_request("execute")).unwrap();
+                        assert_eq!(permission.write[0]["result"]["outcome"]["optionId"], "proceed_once");
+                    }
+                    (None, Ok(step)) => {
+                        assert_eq!(step.failure.as_deref(), Some("This harness does not advertise the selected task mode."));
+                        assert!(step.write.is_empty());
+                    }
+                    (expected, result) => panic!("offered {offered:?}, config options {config_options}: expected {expected:?}, success {}", result.is_ok()),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_plan_stops_before_model_selection_or_prompt() {
+        for config_options in [true, false] {
+            let mut frame = session();
+            let offered = ["default", "acceptEdits", "auto", "dontAsk", "yolo"];
+            frame["result"]["modes"]["availableModes"] = json!(offered.iter().map(|id| json!({"id":id})).collect::<Vec<_>>());
+            frame["result"]["configOptions"][0]["options"] = json!(offered.iter().map(|id| json!({"value":id})).collect::<Vec<_>>());
+            if !config_options { frame["result"].as_object_mut().unwrap().remove("configOptions"); }
+            let script = format!(r#"
+if(r.method==='initialize') send({{id:r.id,result:{{protocolVersion:1}}}});
+else if(r.method==='session/new') send({frame});
+else send({{id:r.id,result:{{}}}});
+"#);
+            let (child, dir) = fake_child(&script);
+            let mut cfg = super::super::tests::config("qoder");
+            cfg.cwd = dir.0.clone();
+            cfg.mode = "plan".into();
+            cfg.model = "efficient".into();
+            let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
+            let seen = events.clone();
+            let (_input, receiver) = tokio::sync::mpsc::unbounded_channel();
+            let result = run_process_with_tools(cfg, Arc::new(move |e| seen.lock().unwrap().push(e)), receiver, child, vec![], None).await;
+            assert_eq!(result.unwrap_err(), "This harness does not advertise the selected task mode.");
+            assert_eq!(requests(&dir.0).iter().map(|r| r["method"].as_str().unwrap()).collect::<Vec<_>>(), ["initialize", "session/new"]);
+            assert!(!events.lock().unwrap().iter().any(|e| e.kind == "approval" || e.tool.is_some()));
+            assert!(events.lock().unwrap().iter().any(|e| e.kind == "session" && e.text == "ses_qoder_test"), "setup failure must retain the owned session ID for checked cleanup");
+        }
     }
 
     /// Synthetic shape: every recording advertises a `mode` configOption, but a
@@ -471,7 +543,7 @@ mod tests {
         let mut unsupported = session();
         unsupported["result"].as_object_mut().unwrap().remove("configOptions");
         unsupported["result"]["modes"]["availableModes"] = json!([{"id":"default","name":"Default"}]);
-        let error = p.acp(unsupported).err().unwrap();
+        let error = p.acp(unsupported).unwrap().failure.unwrap();
         assert_eq!(error, "This harness does not advertise the selected task mode.");
     }
 
@@ -482,7 +554,7 @@ mod tests {
             cfg.mode = mode.into();
             let mut p = Protocol::new(cfg);
             p.acp(initialize()).unwrap();
-            let error = p.acp(json!({"jsonrpc":"2.0","id":2,"result":{"sessionId":"ses_qoder_test"}})).err().unwrap();
+            let error = p.acp(json!({"jsonrpc":"2.0","id":2,"result":{"sessionId":"ses_qoder_test"}})).unwrap().failure.unwrap();
             assert_eq!(error, "This harness does not advertise the selected task mode.", "{mode}");
         }
     }
@@ -955,13 +1027,19 @@ else if(r.method==='session/delete') {{
         let path = executable("qoder").expect("Install Qoder CLI first");
         let (events, outcome) = live_turn(&path, &cwd, "plan", "Use your file-writing tool to overwrite sentinel.txt with CHANGED and create plan-target.txt containing CHANGED.".into(), None).await;
         let cleanup = cleanup_live_sessions(&path, &cwd, events.iter()).await;
-        assert!(outcome.is_ok(), "the Plan turn should finish");
         cleanup.expect("all test-owned sessions should acknowledge deletion");
         assert_eq!(std::fs::read_to_string(cwd.join("sentinel.txt")).unwrap(), "KEEP\n");
         assert!(!cwd.join("plan-target.txt").exists());
-        assert!(events.iter().any(|e| e.kind == "status" && e.text.starts_with("Plan mode declined:")),
-            "inconclusive: no actual Plan decline event; a text-only refusal does not prove enforcement");
         assert!(!events.iter().any(|e| e.kind == "approval"), "Plan must not need manual approval");
+        match outcome {
+            Ok(()) => assert!(events.iter().any(|e| e.kind == "status" && e.text.starts_with("Plan mode declined:")),
+                "inconclusive: no actual Plan decline event; a text-only refusal does not prove enforcement"),
+            Err(error) if error == "This harness does not advertise the selected task mode." => {
+                assert!(!events.iter().any(|e| e.tool.is_some()), "unsupported Plan must not execute tools");
+                panic!("unsupported Plan: the installed CLI did not advertise the task mode during session setup, before model selection or prompting; files unchanged, no approvals or tools, cleanup acknowledged; write enforcement was not tested");
+            }
+            Err(_) => panic!("Plan turn failed with an unexpected setup or execution error; cleanup acknowledged; write enforcement was not established"),
+        }
     }
 
     /// Removes the throwaway repo when the test ends, pass or fail.
