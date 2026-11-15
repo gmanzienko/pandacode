@@ -25,17 +25,32 @@ const PINNED = {
 };
 const RECORDED = 'c36b8439088d258f';
 
+/** A source read as UTF-8 with LF newlines: a CRLF checkout hashes as the same markup. */
+function sourceText(file, text) {
+  return (text ?? readFileSync(new URL(`../${file}`, import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
+}
+
 /** A top-level function's text in `file`, from its declaration to the next top-level statement. */
-function functionText(file, name) {
-  const source = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+function functionText(file, name, text) {
+  const source = sourceText(file, text);
   const start = source.search(new RegExp(`^(?:export )?(?:async )?(?:function ${name}\\(|const ${name} = )`, 'm'));
   assert.ok(start >= 0, `${file} no longer declares ${name} at the top level: update PINNED`);
   const rest = source.slice(start + 1), end = rest.search(/^(?:export |function |async function |const |let |type |\/\*\*|\/\/|[a-zA-Z$_.]+\()/m);
   return source.slice(start, start + 1 + (end < 0 ? rest.length : end));
 }
 
+function pinnedHash(pinned = PINNED, text) {
+  return createHash('sha256').update(Object.entries(pinned).flatMap(([file, names]) => names.map(name => functionText(file, name, text))).join('\n')).digest('hex').slice(0, 16);
+}
+
+test('the pinned hash reads LF and CRLF sources as one, and a changed function still moves it', () => {
+  const pinned = { 'turn.ts': ['turnHtml'] }, lf = 'function turnHtml() {\n  return `<p>one</p>`;\n}\n';
+  assert.equal(pinnedHash(pinned, lf), pinnedHash(pinned, lf.replace(/\n/g, '\r\n')));
+  assert.notEqual(pinnedHash(pinned, lf), pinnedHash(pinned, lf.replace('one', 'two')));
+});
+
 test('turnHtml and its inputs are as the markup cache was last checked against', () => {
-  const hash = createHash('sha256').update(Object.entries(PINNED).flatMap(([file, names]) => names.map(name => functionText(file, name))).join('\n')).digest('hex').slice(0, 16);
+  const hash = pinnedHash();
   assert.equal(hash, RECORDED, 'turnHtml or a function it draws with changed: put any new input in savedTurnHtml `parts` or `markupEnv`, then record this hash in tests/transcript-markup.test.mjs');
 });
 

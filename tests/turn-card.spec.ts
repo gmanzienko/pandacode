@@ -22,7 +22,7 @@ test('saved turns: header sentence and time, clamped reply, footer only with cha
   await expect(short.locator('.turn-card-time')).toHaveText('4s');
   await expect(short.locator('.turn-card-foot')).toHaveCount(0);
   await expect(short.locator('.turn-card-more')).toBeHidden();
-  await expect(long.locator('.turn-activity-label')).toContainText('Read 2 files');
+  await expect(long.locator('.turn-activity-label')).toHaveText('Ran tests and read 2 files');
   await expect(long.locator('.turn-card-time')).toHaveText('1h 30m 10s');
   // The header opens the step trace inside the card.
   const header = long.locator('.turn-activity-summary');
@@ -218,6 +218,37 @@ test('what sits above the live card stays still as it shrinks', async ({ page })
 
 });
 
+test('a live fold holds the final pin after the card stops growing', async ({ page }) => {
+  await page.route('**/src/main.ts*', async route => {
+    const response = await route.fetch();
+    await route.fulfill({ response, body: await response.text() + `
+      window.__finalPin = () => {
+        cancelAnimationFrame(followFrame); followFrame = 0;
+        stickToBottom = true; tailBridging = false; setTailRoom(0);
+        transcriptScroller.scrollTop = transcriptScroller.scrollHeight - transcriptScroller.clientHeight - 3;
+        keepTopOnShrink();
+        const snapshot = liveCardSeen.top;
+        stickTranscript();
+        return { snapshot, pinned: transcriptScroller.scrollTop };
+      };
+    ` });
+  });
+  await open(page);
+  const live = page.locator('#stream-region .turn-card.is-live');
+  await liveEvent(page, { kind: 'text', text: 'Looking into it.' });
+  await liveEvent(page, step('long', 'completed', Array.from({ length: 400 }, (_, line) => `output line ${line}`).join('\n')));
+  await page.waitForTimeout(500);
+  const pin = await page.evaluate(() => (window as any).__finalPin());
+  expect(pin.pinned - pin.snapshot).toBe(3);
+  const held = (await live.boundingBox())!;
+  expect(held.y).toBeGreaterThan(60);
+  await live.locator('details[data-tool-key$="long"] > summary').evaluate(node => (node as HTMLElement).click());
+  await expect.poll(async () => (await live.boundingBox())!.height).toBeLessThan(held.height - 60);
+  await page.waitForTimeout(400);
+  expect(await page.locator('#transcript').evaluate(node => node.scrollTop)).toBe(pin.pinned);
+  expect((await live.boundingBox())!.y).toBe(held.y);
+});
+
 test('a card taller than the window folds down into view, never leaving the window empty', async ({ page }) => {
   await open(page);
   await page.setViewportSize({ width: 1440, height: 620 });
@@ -268,6 +299,41 @@ test('reduced motion leaves no card animations', async ({ page }) => {
   expect(await animations()).toBe(0);
 });
 
+
+test('fractional live-card shrink preserves the last painted scroll position', async ({ page }) => {
+  await page.route('**/src/main.ts*', async route => {
+    const response = await route.fetch();
+    await route.fulfill({ response, body: await response.text() + `
+      window.__shrinkFixture = {
+        prime() { cancelAnimationFrame(followFrame); followFrame = 0; stickToBottom = true; tailBridging = false; setTailRoom(0); liveCardSeen = undefined; transcriptScroller.scrollTop = transcriptScroller.scrollHeight; lastTranscriptTop = transcriptScroller.scrollTop; keepTopOnShrink(); },
+        follow() { transcriptScroller.dispatchEvent(new Event("scroll")); followTranscript(); }
+      };
+    ` });
+  });
+  await open(page);
+  const result = await page.evaluate(() => {
+    const scroller = document.querySelector<HTMLElement>('#transcript')!;
+    scroller.innerHTML = '<div style="height:500px;flex:none"></div><div id="stream-region"><div class="turn-card is-live" style="height:226.5px;min-height:0;padding:0;border:0;margin:0;box-sizing:border-box"></div></div>';
+    scroller.style.cssText = 'height:500px;max-height:500px;flex:none;overflow:auto;padding:0;scroll-padding-top:0';
+    const card = scroller.querySelector<HTMLElement>('.turn-card')!, fixture = (window as any).__shrinkFixture;
+    fixture.prime();
+    const before = scroller.scrollTop, top = card.getBoundingClientRect().top;
+    const positions = [];
+    // Each subpixel shrink can cross the engine's integer scrollHeight boundary.
+    for (const height of [226.078125, 225.65625, 225.234375, 224.8125, 224.390625, 223.96875]) {
+      card.style.height = height + 'px';
+      fixture.follow();
+      positions.push({ scroll: scroller.scrollTop, top: card.getBoundingClientRect().top });
+    }
+    return { before, top, positions };
+  });
+  expect(result.before).toBeGreaterThan(0);
+  for (const position of result.positions) {
+    expect(position.scroll).toBe(result.before);
+    expect(position.top).toBe(result.top);
+  }
+});
+
 test('the live card hands off to the saved card in one frame, eases once at the end, and the prompt does not jump', async ({ page }) => {
   const errors = await open(page);
   // Sampled every frame from the send until well after the saved card took over.
@@ -291,7 +357,23 @@ test('the live card hands off to the saved card in one frame, eases once at the 
   await expect(page.locator('#stream-region .turn-card')).toHaveCount(0, { timeout: 10000 });
   await expect(cards(page)).toHaveCount(3);
   await page.waitForTimeout(1200);
-  const frames = await page.evaluate(() => (window as unknown as { __frames: { cards: number; live: number; liveHeight: number | null; lastHeight: number | null; text: boolean; done: boolean; folded: boolean; bubble: number | null; height: number; t: number }[] }).__frames);
+  const paints = await page.evaluate(() => (window as unknown as { __frames: { cards: number; live: number; liveHeight: number | null; lastHeight: number | null; text: boolean; done: boolean; folded: boolean; bubble: number | null; height: number; t: number }[] }).__frames);
+  // Summary sampling must retain every raw paint for the independent pixel guards.
+  const frames = paints;
+  const paintLive = paints.map((paint, index) => ({ ...paint, index })).filter(paint => paint.live);
+  const paintFrom = paintLive.find(paint => paint.text)!.index, paintSwap = paintLive.at(-1)!.index + 1;
+  for (let i = paintFrom + 1; i < paintSwap; i++) {
+    expect(paints[i - 1].bubble).not.toBeNull();
+    expect(paints[i].bubble).not.toBeNull();
+    const step = paints[i].bubble! - paints[i - 1].bubble!;
+    expect(Math.abs(step), `prompt jumped ${step}px at raw paint ${i}`).toBeLessThanOrEqual(40);
+  }
+  for (let i = paintSwap; i < paints.length; i++) {
+    expect(paints[i - 1].lastHeight).not.toBeNull();
+    expect(paints[i].lastHeight).not.toBeNull();
+    const step = paints[i].lastHeight! - paints[i - 1].lastHeight!;
+    expect(Math.abs(step), `the saved card jumped ${step}px at raw paint ${i}`).toBeLessThanOrEqual(16);
+  }
   const liveFrames = frames.map((frame, index) => ({ ...frame, index })).filter(frame => frame.live);
   expect(liveFrames.length).toBeGreaterThan(5);
   // Never two cards for one turn: two saved turns plus either the live card or the new saved one.
@@ -302,15 +384,16 @@ test('the live card hands off to the saved card in one frame, eases once at the 
   // From the first token on, the prompt above the card moves only with the follow (the reply growing; a result card
   // unfolding is followed at most FOLLOW_MAX_LAG behind), never down while the trace folds (blank room takes its
   // height), and not at all from the handoff on: the live card is at its saved shape and nothing moves by itself.
-  // The motion budgets are per unit time, written as the pixels one 60 Hz frame may cover: a host that paints at
-  // 30 Hz covers twice the pixels between two samples, and the ease is no less gentle for it.
+  // The motion budgets are per unit time, written as the pixels one 60 Hz frame may cover.
+  // Summaries observed at 30 Hz may span multiple raw paints; the raw paint caps still apply independently.
+  // Delayed post-paint tasks can share a frame timestamp; retain their positions and use the strict one-frame budget.
   const frameMs = 1000 / 60;
   const from = liveFrames.find(frame => frame.text)!.index, swap = liveFrames.at(-1)!.index + 1;
   for (let i = from + 1; i < frames.length; i++) {
     const step = frames[i].bubble! - frames[i - 1].bubble!, elapsed = frames[i].t - frames[i - 1].t;
     if (i >= swap) expect(Math.abs(step), `prompt moved ${step}px at frame ${i}`).toBeLessThanOrEqual(1);
     else {
-      expect(Math.abs(step) / elapsed, `prompt moved ${step}px in ${elapsed}ms at frame ${i}`).toBeLessThanOrEqual(40 / frameMs);
+      expect(Math.abs(step) / (elapsed > 0 ? elapsed : frameMs), `prompt moved ${step}px in ${elapsed}ms at frame ${i}`).toBeLessThanOrEqual(40 / frameMs);
       expect(step, `prompt slid down ${step}px at frame ${i}`).toBeLessThanOrEqual(1);
     }
   }
@@ -319,7 +402,7 @@ test('the live card hands off to the saved card in one frame, eases once at the 
   const after = frames.slice(swap - 1), direction = Math.sign(after.at(-1)!.lastHeight! - after[0].lastHeight!);
   for (let i = 1; i < after.length; i++) {
     const step = after[i].lastHeight! - after[i - 1].lastHeight!, elapsed = after[i].t - after[i - 1].t;
-    expect(Math.abs(step) / elapsed, `the saved card moved ${step}px in ${elapsed}ms`).toBeLessThanOrEqual(16 / frameMs);
+    expect(Math.abs(step) / (elapsed > 0 ? elapsed : frameMs), `the saved card moved ${step}px in ${elapsed}ms`).toBeLessThanOrEqual(16 / frameMs);
     expect(step * direction, `the saved card reversed at frame ${swap - 1 + i}`).toBeGreaterThanOrEqual(-0.5);
   }
   // Each redraw is one layout: a saved reply is clamped in the task it is drawn, so no frame sees it at full height (a spike).
