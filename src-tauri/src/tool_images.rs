@@ -350,8 +350,9 @@ fn opened_path(_file: &File) -> Option<PathBuf> {
     None
 }
 
-/// The opened file must lie under `within` (as given, or as its own descriptor
-/// spells it, so firmlinks and case agree) and never in a network mount.
+/// The opened file must lie under the captured canonical `within` and never in
+/// a network mount. Non-Windows roots may also use their descriptor spelling
+/// so firmlinks and case agree.
 /// Platforms without descriptor paths rely on the checks before the open.
 fn check_opened(file: &File, within: Option<&Path>) -> Result<(), String> {
     let Some(opened) = opened_path(file) else {
@@ -370,15 +371,19 @@ fn check_opened(file: &File, within: Option<&Path>) -> Result<(), String> {
     }
     let Some(root) = within else { return Ok(()) };
     refuse_network_hops(root)?;
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
     #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(windows::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS.0);
-    }
-    let root_opened = options.open(root).ok().and_then(|dir| opened_path(&dir));
-    if opened.starts_with(root) || root_opened.is_some_and(|spelled| opened.starts_with(spelled)) {
+    let contained = {
+        // Normalize only the DOS prefix; reopening the root could follow a replacement link.
+        let mut verbatim_root = std::ffi::OsString::from(r"\\?\");
+        verbatim_root.push(root.as_os_str());
+        opened.starts_with(root) || opened.starts_with(Path::new(&verbatim_root))
+    };
+    #[cfg(not(windows))]
+    let contained = {
+        let root_opened = File::open(root).ok().and_then(|dir| opened_path(&dir));
+        opened.starts_with(root) || root_opened.is_some_and(|spelled| opened.starts_with(spelled))
+    };
+    if contained {
         Ok(())
     } else {
         Err(ERR_OUTSIDE.into())
@@ -877,3 +882,35 @@ pub fn load_sized(
 #[cfg(test)]
 #[path = "tool_images_tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+#[test]
+fn tool_image_windows_replaced_root_cannot_expand_authorized_folder() {
+    let dir = std::env::temp_dir().join(format!("tool-image-root-boundary-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let root = dir.join("checkout");
+    let original = dir.join("original-checkout");
+    let outside = dir.join("outside");
+    for folder in [&root, &outside] {
+        std::fs::create_dir(folder).unwrap();
+        std::fs::write(folder.join("x.png"), b"test-owned image").unwrap();
+    }
+    let within = root.canonicalize().unwrap();
+    let target = resolve_relative(&root, Path::new("x.png")).unwrap();
+    assert!(open_checked(&target, Some(&within), TOOL_IMAGE_LIMIT).is_ok());
+    let outside_file = open_no_follow(&outside.join("x.png")).unwrap();
+    assert_eq!(check_opened(&outside_file, Some(&within)).unwrap_err(), ERR_OUTSIDE);
+    drop(outside_file);
+    std::fs::rename(&root, &original).unwrap();
+    std::os::windows::fs::symlink_dir(&outside, &root)
+        .expect("this regression requires a local directory symlink");
+    // Reproduce the state between canonical containment and handle validation.
+    let file = open_no_follow(&target).unwrap();
+    assert_eq!(opened_path(&file).unwrap(), outside.join("x.png").canonicalize().unwrap());
+    let result = check_opened(&file, Some(&within));
+    drop(file);
+    std::fs::remove_dir(&root).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(result, Err(ERR_OUTSIDE.to_owned()));
+}
