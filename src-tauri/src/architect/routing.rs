@@ -164,10 +164,26 @@ fn reviewers(team: &TeamSnapshot, args: &Value) -> Reviewers {
     out
 }
 
-/// The team's config, its checkout's main languages (cached per checkout), failed workers' chains and
-/// the dispatch's reviewers, for routing.
-pub(super) async fn team_context(app: &tauri::AppHandle, sid: &str, generation: u64, args: &Value) -> Result<(TeamConfig, Vec<String>, Chains, Reviewers)> {
-    let (config, root, chains, reviewers) = {
+/// Assignment key -> the speed tier key of the worker it replaces, which the replacement must keep.
+pub(crate) type ReplacedTiers = HashMap<String, String>;
+
+/// The speed tiers this dispatch's replacements inherit from the workers they replace.
+pub(super) fn replaced_tiers(team: &TeamSnapshot, args: &Value) -> ReplacedTiers {
+    args["assignments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|a| {
+            let old = team.workers.iter().find(|w| Some(w.id.as_str()) == a["replaces"].as_str())?;
+            Some((a["key"].as_str()?.to_string(), old.service_tier.clone()?))
+        })
+        .collect()
+}
+
+/// The team's config, its checkout's main languages (cached per checkout), failed workers' chains
+/// and the tiers replacements inherit, for routing.
+pub(super) async fn team_context(app: &tauri::AppHandle, sid: &str, generation: u64, args: &Value) -> Result<(TeamConfig, Vec<String>, Chains, ReplacedTiers, Reviewers)> {
+    let (config, root, chains, tiers, reviewers) = {
         let state = app.state::<AppState>();
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let team = load(&store, sid)?.ok_or("Team unavailable.")?;
@@ -177,13 +193,14 @@ pub(super) async fn team_context(app: &tauri::AppHandle, sid: &str, generation: 
         let lead = store.session(sid)?;
         let chains = chains(&store, &team, args)?;
         let reviewers = reviewers(&team, args);
-        (team.config, store.workspace_root(&lead.project_id, Some(sid)).ok(), chains, reviewers)
+        let tiers = replaced_tiers(&team, args);
+        (team.config, store.workspace_root(&lead.project_id, Some(sid)).ok(), chains, tiers, reviewers)
     };
     let langs = match root {
         Some(root) => tokio::task::spawn_blocking(move || model_routing::repo_languages(&root)).await.unwrap_or_default(),
         None => Vec::new(),
     };
-    Ok((config, langs, chains, reviewers))
+    Ok((config, langs, chains, tiers, reviewers))
 }
 
 /// Worker assignments run as tool-using coding agents in the team's checkout.
@@ -233,14 +250,49 @@ pub(super) fn auto_from(keys: Vec<String>, routes: Option<std::result::Result<Ve
     }
 }
 
-pub(super) async fn auto_routes(config: &TeamConfig, langs: &[String], chains: &Chains, reviewers: &Reviewers, args: &Value) -> AutoRoutes {
+/// Routed jobs grouped by the pool they route over: the team's pool, or for a replacement that keeps
+/// a speed tier, only the Codex models whose live catalog lists it (`pool_for`).
+pub(super) fn tier_groups(config: &TeamConfig, keys: Vec<String>, jobs: Vec<Job>, tiers: &ReplacedTiers, speeds: &super::SpeedCatalog) -> Vec<(Vec<String>, Vec<PoolModel>, Vec<Job>)> {
+    let mut groups: Vec<(Option<String>, Vec<String>, Vec<Job>)> = Vec::new();
+    for (key, job) in keys.into_iter().zip(jobs) {
+        let tier = tiers.get(&key).cloned();
+        match groups.iter_mut().find(|g| g.0 == tier) {
+            Some(group) => {
+                group.1.push(key);
+                group.2.push(job);
+            }
+            None => groups.push((tier, vec![key], vec![job])),
+        }
+    }
+    groups.into_iter().map(|(tier, keys, jobs)| (keys, pool_for(config, tier.as_deref(), speeds), jobs)).collect()
+}
+
+/// The routing pool, narrowed for a required speed tier to Codex models whose live catalog lists it
+/// (empty when the catalog could not be read, so nothing untiered is ever picked).
+pub(super) fn pool_for(config: &TeamConfig, tier: Option<&str>, speeds: &super::SpeedCatalog) -> Vec<PoolModel> {
+    let pool = pool(config);
+    let Some(tier) = tier else {
+        return pool;
+    };
+    let Some(Ok(catalog)) = speeds else {
+        return Vec::new();
+    };
+    pool.into_iter()
+        .filter(|m| m.provider == "codex" && catalog.get(&m.model).is_some_and(|tiers| crate::command_operations::find_tier(tiers, tier).is_some()))
+        .collect()
+}
+
+pub(super) async fn auto_routes(config: &TeamConfig, langs: &[String], chains: &Chains, tiers: &ReplacedTiers, speeds: &super::SpeedCatalog, reviewers: &Reviewers, args: &Value) -> AutoRoutes {
     let (keys, jobs) = auto_jobs(args, langs, chains, by_default(config));
     if keys.is_empty() {
         return AutoRoutes::default();
     }
     // One mode for routing and staffing, even if Settings changes it meanwhile.
     let mode = model_routing::mode();
-    let mut routes = auto_from(keys, model_routing::route_jobs(pool(config), jobs, Some(mode)).await, mode);
+    let mut routes = AutoRoutes::default();
+    for (keys, pool, jobs) in tier_groups(config, keys, jobs, tiers, speeds) {
+        routes.extend(auto_from(keys, model_routing::route_jobs(pool, jobs, Some(mode)).await, mode));
+    }
     diversify(&reviewers.keys, reviewers.taken.clone(), &mut routes);
     routes
 }
@@ -266,7 +318,8 @@ pub(super) fn diversify(reviewers: &[String], mut taken: Vec<(String, String)>, 
     for key in reviewers {
         let Some(Ok(route)) = routes.get_mut(key) else { continue };
         let Some(current) = opening_rung(None, &route.failed, route.mode, &route.ladder).or(route.pick.as_ref()).cloned() else { continue };
-        let free = |m: &&Routed| !taken.iter().any(|(provider, model)| *provider == m.provider && *model == m.model);
+        let free = |m: &&Routed| !taken.iter().any(|(provider, model)| *provider == m.provider
+            && crate::panda_router::base_model(provider, model) == crate::panda_router::base_model(&m.provider, &m.model));
         let mut chosen = current.clone();
         if !free(&&current) {
             let at = route.ladder.iter().position(|m| m.card_id == current.card_id).map_or(0, |i| i + 1);
@@ -283,6 +336,17 @@ pub(super) fn diversify(reviewers: &[String], mut taken: Vec<(String, String)>, 
 
 fn money(usd: f64) -> String {
     if usd < 0.01 { format!("${usd:.4}") } else { format!("${usd:.2}") }
+}
+
+/// The roster profile for a model: its own entry, else a Codex speed variant of it (`<model>@fast`).
+pub(super) fn roster_entry<'a>(config: &'a TeamConfig, provider: &str, model: &str) -> Option<&'a WorkerProfile> {
+    let entries = || config.workers.iter().filter(|p| p.provider == provider);
+    entries().find(|p| p.model == model).or_else(|| entries().find(|p| crate::panda_router::base_model(provider, &p.model) == model))
+}
+
+/// A Codex profile's speed tier: its model slug's, else its serviceTier.
+pub(super) fn profile_tier(profile: &WorkerProfile) -> Option<String> {
+    crate::panda_router::speed_tier(&profile.provider, &profile.model).map(String::from).or_else(|| profile.service_tier.clone())
 }
 
 /// A model the user has not switched off and that is not paused after failures.
@@ -314,6 +378,7 @@ fn unrouted(config: &TeamConfig, lead: &storage::Session) -> WorkerProfile {
         provider: lead.provider.clone(),
         model: lead.model.clone(),
         reasoning_effort: lead.reasoning_effort.clone(),
+        service_tier: roster_entry(config, &lead.provider, &lead.model).and_then(profile_tier),
     };
     if config.auto && !config.roster_only {
         return own();
@@ -327,7 +392,7 @@ fn unrouted(config: &TeamConfig, lead: &storage::Session) -> WorkerProfile {
 /// in Cheap or Balanced mode opens on the ladder's first (cheapest safe) rung and escalates from there;
 /// Best mode and escalations take the policy's pick.
 /// Returns the profile, the routing note, and how the effort was fitted to the model.
-pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &Assignment, routes: &AutoRoutes) -> Result<(WorkerProfile, String, Option<String>)> {
+pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &Assignment, routes: &AutoRoutes) -> Result<(WorkerProfile, super::TierOrigin, String, Option<String>)> {
     if assignment.provider.is_some() || assignment.model.is_some() {
         return Err("Use either profileId or provider and model, not both.".into());
     }
@@ -337,7 +402,7 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
         Ok(routed @ AutoRoute { pick: Some(policy), ladder, decided_by, failed, difficulty, category, profiler, .. }) => {
             let opener = opener(routed);
             let pick = opener.cloned().unwrap_or_else(|| policy.clone());
-            let roster = config.workers.iter().find(|p| p.provider == pick.provider && p.model == pick.model);
+            let roster = roster_entry(config, &pick.provider, &pick.model);
             if config.roster_only && roster.is_none() {
                 return Err("Panda Router picked a model outside this team.".into());
             }
@@ -364,8 +429,10 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
                 provider: pick.provider,
                 model: pick.model,
                 reasoning_effort,
+                // Only a matched roster profile carries a speed tier: routing never picks one itself.
+                service_tier: roster.and_then(profile_tier),
             };
-            return Ok((profile, note, adjusted));
+            return Ok((profile, super::TierOrigin::Implicit, note, adjusted));
         }
         Ok(_) => "no rated model fits",
         Err(reason) => reason,
@@ -373,7 +440,7 @@ pub(super) fn staff(config: &TeamConfig, lead: &storage::Session, assignment: &A
     let profile = unrouted(config, lead);
     let (reasoning_effort, adjusted) = model_efforts::apply(&profile.provider, &profile.model, wanted, profile.reasoning_effort.as_ref());
     let note = format!("not routed ({reason}), using {} · {}", profile.name, profile.provider);
-    Ok((WorkerProfile { reasoning_effort, ..profile }, note, adjusted))
+    Ok((WorkerProfile { reasoning_effort, ..profile }, super::TierOrigin::Implicit, note, adjusted))
 }
 
 #[derive(Deserialize)]
@@ -416,8 +483,10 @@ pub(super) fn route_request(config: &TeamConfig, langs: &[String], args: Value) 
             .failed
             .into_iter()
             .map(|f| {
-                let name = pool.iter().find(|m| m.provider == f.provider && m.model == f.model).map_or_else(|| f.model.clone(), |m| m.name.clone());
-                PoolModel { provider: f.provider, model: f.model, name }
+                // A failed speed variant failed its model.
+                let model = crate::panda_router::base_model(&f.provider, &f.model).to_string();
+                let name = pool.iter().find(|m| m.provider == f.provider && m.model == model).map_or_else(|| model.clone(), |m| m.name.clone());
+                PoolModel { provider: f.provider, model, name }
             })
             .collect();
         jobs.push(job(&task.text, task.files.unwrap_or(0) as usize, langs, failed));
@@ -425,15 +494,63 @@ pub(super) fn route_request(config: &TeamConfig, langs: &[String], args: Value) 
     Ok((pool, jobs, args.mode))
 }
 
+/// One sentence for the lead naming the team's usable Codex speed variants (at most 8); empty without any.
+pub(super) fn speed_note(config: &TeamConfig) -> String {
+    let catalog = if config.roster_only { &[][..] } else { &config.catalog[..] };
+    let mut slugs: Vec<&str> = Vec::new();
+    for p in config.workers.iter().chain(catalog) {
+        if crate::panda_router::speed_tier(&p.provider, &p.model).is_some() && usable(p) && !slugs.contains(&p.model.as_str()) {
+            slugs.push(&p.model);
+        }
+    }
+    if slugs.is_empty() {
+        return String::new();
+    }
+    let more = if slugs.len() > 8 { ", …" } else { "" };
+    slugs.truncate(8);
+    format!(" Codex speed variants from its catalog (provider codex, model <model>@<tier>: faster, extra usage; routing never picks them, so name one only when speed matters or the user asks): {}{more}", slugs.join(", "))
+}
+
+/// How route_models marks a speed variant's cost: the Codex catalog prices no tier.
+pub(super) const EXTRA_USAGE: &str = "extra usage";
+
+/// The usable Codex speed variants (`<model>@<tier>` slugs) the team's models list for a model.
+pub(super) fn speed_variants(config: &TeamConfig, provider: &str, model: &str) -> Vec<String> {
+    if provider != "codex" {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = Vec::new();
+    // A named team offers only its own entries.
+    let catalog = if config.roster_only { &[][..] } else { &config.catalog[..] };
+    for p in config.workers.iter().chain(catalog).filter(|p| p.provider == provider) {
+        if let (base, Some(_)) = super::split_tier(&p.model) {
+            if base == model && usable(p) && !out.contains(&p.model) {
+                out.push(p.model.clone());
+            }
+        }
+    }
+    out
+}
+
 /// Compact route_models output: pick and why, up to 3 alternatives, the first 4 rungs of the
 /// escalation ladder, difficulty, category, unrated count, and which profiler ran ("heuristic" while
 /// the ONNX profiler downloads). Past `PAGE_BYTES` every task drops its alternatives and ladder
 /// (`trimmed`), and tasks that still do not fit are left out, last first (`omittedTasks`).
 pub(super) fn route_summary(config: &TeamConfig, routes: &[Route]) -> Value {
+    let usd = |x: f64| (x * 10000.0).round() / 10000.0;
     let model = |m: &Routed| {
-        let mut entry = json!({"provider":m.provider,"model":m.model,"name":m.name,"pSuccess":(m.p_success * 100.0).round() / 100.0,"estCostUsd":(m.est_cost_usd * 10000.0).round() / 10000.0});
+        let mut entry = json!({"provider":m.provider,"model":m.model,"name":m.name,"pSuccess":(m.p_success * 100.0).round() / 100.0,"estCostUsd":usd(m.est_cost_usd)});
         if let Some(p) = config.workers.iter().find(|p| p.provider == m.provider && p.model == m.model) {
             entry["profileId"] = json!(p.id);
+        }
+        // Speed variants the lead may name (routing never picks them): the model's own P and cost
+        // estimate, faster, with extra usage the catalog does not price.
+        let speeds: Vec<Value> = speed_variants(config, &m.provider, &m.model)
+            .into_iter()
+            .map(|slug| json!({"model":slug,"estCostUsd":usd(m.est_cost_usd),"cost":EXTRA_USAGE}))
+            .collect();
+        if !speeds.is_empty() {
+            entry["speedVariants"] = Value::Array(speeds);
         }
         if let Some(tier) = m.tier {
             entry["tier"] = json!(tier);
@@ -521,6 +638,14 @@ mod council_diversity_tests {
     }
 
     #[test]
+    fn speed_variants_of_one_codex_model_are_not_reviewer_diversity() {
+        let mut routes = AutoRoutes::new();
+        routes.insert("r".into(), route(Mode::Balanced, rung("codex", "m"), vec![rung("codex", "m"), rung("codex", "m@fast"), rung("codex", "other")]));
+        diversify(&keys(&["r"]), vec![("codex".into(), "m@ultrafast".into())], &mut routes);
+        assert_eq!(pinned(&routes, "r").as_deref(), Some("codex/other"));
+    }
+
+    #[test]
     fn explicitly_staffed_reviewers_count_as_taken() {
         let mut routes = AutoRoutes::new();
         routes.insert("r1".to_string(), route(Mode::Balanced, rung("a", "1"), vec![rung("a", "1"), rung("b", "2")]));
@@ -532,7 +657,7 @@ mod council_diversity_tests {
     fn a_replacement_that_inherits_its_lens_is_a_reviewer_and_explicit_ones_are_taken() {
         let mut team = crate::architect::new_team("lead".into(), TeamConfig {
             auto: false, roster_only: false, name: None,
-            workers: vec![WorkerProfile { id: "fast".into(), name: "Fast".into(), provider: "codex".into(), model: "m".into(), reasoning_effort: None }],
+            workers: vec![WorkerProfile { id: "fast".into(), name: "Fast".into(), provider: "codex".into(), model: "m".into(), reasoning_effort: None, service_tier: None }],
             catalog: vec![], max_parallel: 0, max_rounds: 0, max_assignments: 0, workspace: "shared".into(), summary_limit: 0, lead_guidance: None,
             council: Some(Default::default()),
         });

@@ -6,6 +6,8 @@ export interface WorkerProfile {
   provider: ProviderId;
   model: string;
   reasoningEffort?: string | null;
+  /** Codex workers only: a speed tier key from the model's catalog (`SpeedTier.key`); unset is the model's default. */
+  serviceTier?: string | null;
 }
 /** What a council must reach: every reviewer at `target`, within `maxRounds` completed rounds (1-100), with `reviewers` seats (0 = the lead decides). */
 export interface CouncilConfig { target: number; maxRounds: number; reviewers: number }

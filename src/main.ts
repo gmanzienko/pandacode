@@ -3491,7 +3491,7 @@ function renderComposer(): void {
     : `<button type="submit" class="send-button" title="Send message (${shortcut('Enter')})" aria-label="Send message" ${togglingTeam ? 'disabled' : ''}>${icon('arrow')}</button>`;
   // The composer redraws on every session change; the orchestration slot's nodes outlive it.
   const orchestrationSlot = document.querySelector('#machine-orchestration');
-  $('#composer-area').innerHTML = `<form id="composer" class="composer ${running ? 'composer-running' : ''}">${wakeStrip(s.id)}${queuePanel({ entries: state.queues.get(s.id) ?? [], hold: state.queueHolds.get(s.id) ?? null, running, steerable: !team && !offline, sendable: !botProjects.has(s.projectId) && !offline, editingId: state.queueEditing || null, busy: state.queueBusy.has(s.id), steering: steeringQueued, notSteered, agentName: botForThread()?.name ?? provider(s.provider)?.name })}${s.remoteDevice ? '' : council.strip(s.id)}<div id="attachments" class="attachments">${attachmentBar(s)}</div>${running && !team ? `<div class="composer-steer-bar"><button type="button" class="icon-button composer-steer-edit" data-action="steer-edit" title="Edit draft" aria-label="Edit draft">${icon('edit')}</button><button type="button" class="steer-button" data-action="steer" title="Steer: send into the running turn (${shortcut('Enter')})" aria-label="Steer the running turn">${STEER_ICON}<span class="sr-only">Steer</span></button><button type="button" class="icon-button composer-steer-clear" data-action="steer-clear" title="Clear draft" aria-label="Clear draft">${icon('close')}</button></div>` : !team && finishingStreams.has(s.id) && !finishingStreams.get(s.id)!.error ? '<div class="composer-steer-bar" data-holding aria-hidden="true"></div>' : ''}<div class="composer-input"><textarea id="prompt" dir="auto" data-session-id="${escape(s.id)}" aria-label="Message your coding agent" placeholder="${running ? (team ? 'Queue a follow-up…' : `Queue a follow-up · ${commandKey}↩ steers now`) : composerPlaceholder()}" aria-description="${escape(promptDescription())}" rows="2"></textarea><div class="composer-actions">${button('attach', 'Attach files for context', 'attach', '', 'type="button"')}${voiceButtonHtml}<span class="composer-pill">${sendControl}</span></div></div><div class="composer-toolbar composer-tray"><div class="composer-tools">${modelTriggerHtml(s, modelLocked, true)}${modeTriggerHtml(s, running || togglingTeam, true)}${teamButton(s)}${tokenSaver.button(s.id)}${s.remoteDevice ? '' : council.button(s.id)}</div>${contextBarHtml(s, newTaskView())}</div></form>`;
+  $('#composer-area').innerHTML = `<form id="composer" class="composer ${running ? 'composer-running' : ''}">${wakeStrip(s.id)}${queuePanel({ entries: state.queues.get(s.id) ?? [], hold: state.queueHolds.get(s.id) ?? null, running, team: Boolean(team), steerable: !team && !offline, sendable: !botProjects.has(s.projectId) && !offline, editingId: state.queueEditing || null, busy: state.queueBusy.has(s.id), steering: steeringQueued, notSteered, agentName: team ? 'Architect' : botForThread()?.name ?? provider(s.provider)?.name })}${s.remoteDevice ? '' : council.strip(s.id)}<div id="attachments" class="attachments">${attachmentBar(s)}</div>${running && !team ? `<div class="composer-steer-bar"><button type="button" class="icon-button composer-steer-edit" data-action="steer-edit" title="Edit draft" aria-label="Edit draft">${icon('edit')}</button><button type="button" class="steer-button" data-action="steer" title="Steer: send into the running turn (${shortcut('Enter')})" aria-label="Steer the running turn">${STEER_ICON}<span class="sr-only">Steer</span></button><button type="button" class="icon-button composer-steer-clear" data-action="steer-clear" title="Clear draft" aria-label="Clear draft">${icon('close')}</button></div>` : !team && finishingStreams.has(s.id) && !finishingStreams.get(s.id)!.error ? '<div class="composer-steer-bar" data-holding aria-hidden="true"></div>' : ''}<div class="composer-input"><textarea id="prompt" dir="auto" data-session-id="${escape(s.id)}" aria-label="Message your coding agent" placeholder="${running ? (team ? 'Message the architect…' : `Queue a follow-up · ${commandKey}↩ steers now`) : composerPlaceholder()}" aria-description="${escape(promptDescription())}" rows="2"></textarea><div class="composer-actions">${button('attach', 'Attach files for context', 'attach', '', 'type="button"')}${voiceButtonHtml}<span class="composer-pill">${sendControl}</span></div></div><div class="composer-toolbar composer-tray"><div class="composer-tools">${modelTriggerHtml(s, modelLocked, true)}${modeTriggerHtml(s, running || togglingTeam, true)}${teamButton(s)}${tokenSaver.button(s.id)}${s.remoteDevice ? '' : council.button(s.id)}</div>${contextBarHtml(s, newTaskView())}</div></form>`;
   // A refresh replaces the textarea and its native undo history with it (#277); the same thread's node goes back in carrying the refresh's attributes.
   if (oldPrompt && oldPrompt.dataset.sessionId === s.id) {
     const fresh = document.querySelector<HTMLTextAreaElement>('#prompt');
@@ -4340,21 +4340,23 @@ async function btwSlash(side: Session, text: string, toolbar: HTMLElement | null
   notify(`Open the side thread as a full thread to use ${text.split(/\s/)[0]}.`);
   return true;
 }
-type SpeedTier = { id: string; name: string; description: string };
-/** `/fast` arguments: a tier name (`fast`/`on`, `ultrafast`), null for the default (`off`/`default`), undefined to choose. */
+type SpeedTier = import('./types').SpeedTier;
+/** `/fast` arguments: a tier key from the model's Codex catalog (`on` is the tier named Fast), null for
+ * the default (`off`/`default`), undefined to choose. The native side checks the key against the catalog. */
 function fastArgument(argumentsText: string): string | null | undefined {
-  const value = argumentsText.trim().toLowerCase();
+  const value = argumentsText.trim();
   if (!value) return undefined;
-  if (value === 'on' || value === 'fast') return 'fast';
-  if (value === 'ultrafast') return 'ultrafast';
-  if (value === 'off' || value === 'default') return null;
-  throw new Error('Use /fast, /fast on, /fast ultrafast, or /fast off.');
+  const lower = value.toLowerCase();
+  if (lower === 'on') return 'fast';
+  if (lower === 'off' || lower === 'default') return null;
+  return value;
 }
 /** Sets a Codex task's speed tier (null: the model's default); the native side checks it against the model's catalog. */
-async function setSpeed(task: Session, tier: string | null, name?: string): Promise<void> {
+async function setSpeed(task: Session, tier: string | null, tiers: readonly SpeedTier[] = []): Promise<void> {
   const updated = await call<Session>('set_task_preference', { sessionId: task.id, request: { action: 'serviceTier', tier } }); Object.assign(task, updated);
-  const label = tier === null ? 'Default' : name ?? (tier === 'fast' ? 'Fast' : tier === 'ultrafast' ? 'Ultrafast' : tier);
-  notify(`Speed: ${label}`);
+  // Named as the catalog names the tier now saved (by its catalog id).
+  const saved = tiers.find(entry => entry.id === task.codexSettings?.serviceTier);
+  notify(`Speed: ${tier === null ? 'Default' : saved?.name ?? tier}`);
 }
 /** Bare `/fast`: Default plus the speed tiers the installed Codex catalog lists for this task's model. */
 async function showSpeedMenu(task: Session): Promise<void> {
@@ -4364,9 +4366,9 @@ async function showSpeedMenu(task: Session): Promise<void> {
   const anchor = (inPanel ? document.querySelector<HTMLElement>('.btw-panel .model-picker') : null)
     ?? document.querySelector<HTMLElement>('#model-picker-trigger') ?? $('#prompt');
   const items = [{ id: '', label: 'Default', description: "The model's standard speed", selected: !current },
-    ...tiers.map(tier => ({ id: tier.id, label: tier.name, description: tier.description, selected: current === tier.id }))];
-  await showChoices(anchor, { title: 'Speed', width: 320, items, onSelect: async id => {
-    try { await setSpeed(task, id || null, tiers.find(tier => tier.id === id)?.name); } catch (error) { notify(errorText(error)); }
+    ...tiers.map(tier => ({ id: tier.key, label: tier.name, description: tier.description, selected: current === tier.id }))];
+  await showChoices(anchor, { title: 'Speed', width: 320, items, onSelect: async key => {
+    try { await setSpeed(task, key || null, tiers); } catch (error) { notify(errorText(error)); }
   } });
 }
 async function performSlashAction(action: string, argumentsText: string, task: Session): Promise<void> {
@@ -4399,7 +4401,7 @@ async function performSlashAction(action: string, argumentsText: string, task: S
     case 'fast': {
       const wanted = fastArgument(argumentsText);
       if (wanted === undefined) { await showSpeedMenu(task); break; }
-      await setSpeed(task, wanted);
+      await setSpeed(task, wanted, wanted === null ? [] : await call<SpeedTier[]>('codex_service_tiers', { sessionId: task.id }).catch(() => []));
       break;
     }
     case 'plan': {
@@ -4449,6 +4451,7 @@ const runEndings = new Map<string, 'failed' | 'stopped' | 'limited'>();
 /** Entries picked with Send now: delivered before the rest, even past a hold. While the run they
  * stopped is ending, `stopping` keeps the hold from before, so the stop does not pause the others. */
 const sendFirst = new Map<string, { id: string; stopping?: boolean; hold?: HoldReason }>();
+const pendingQueueDispatches = new Set<string>();
 function queueOf(id: string): QueuedMessage[] { return state.queues.get(id) ?? []; }
 function setQueue(id: string, entries: QueuedMessage[]): void { if (entries.length) state.queues.set(id, entries); else state.queues.delete(id); btwPanel.event(id, 'queue'); }
 function composerPayload(s: Session): { text: string; items: QueuedMessage['attachments'] } {
@@ -4517,6 +4520,7 @@ async function enqueueDraft(forceQueue: boolean): Promise<void> {
     restoreComposer(s, text, promptItems, paths);
     throw error;
   } finally { if (s.id === state.sessionId) renderComposer(); finishSubmit(); }
+  if (!s.remoteDevice && teamActive(teams.get(s.id))) await dispatchQueue(s.id);
 }
 /** A committed send owns this draft; later typing belongs to the next message. The field keeps its height until the
  * send's own render (after followSend) rebuilds it: shrinking it here, before the follow is armed, grows the transcript
@@ -4631,7 +4635,7 @@ async function steerDraft(): Promise<void> {
   }
   if (!text) { document.querySelector<HTMLTextAreaElement>('#prompt')?.focus(); return; }
   if (items.length || teams.get(s.id)) {
-    notify(items.length ? 'Attachments travel with queued messages, so this one was queued.' : 'A team takes messages between runs, so this one was queued.');
+    notify(items.length ? 'Attachments travel with queued messages, so this one was queued.' : 'Queued for the next architect turn.');
     return enqueueFromComposer();
   }
   const finishSubmit = voiceDictation.beginSubmit(s.id); if (!finishSubmit) return;
@@ -4699,10 +4703,10 @@ async function queueAction(action: string, element: HTMLElement): Promise<void> 
   if (action === 'queue-remove') { await call('queue_remove', { id }); setQueue(s.id, queueOf(s.id).filter(item => item.id !== id)); refreshComposer(s); return; }
   if (action === 'queue-resume') { state.queueHolds.delete(s.id); refreshComposer(s); await dispatchQueue(s.id); }
 }
-/** Sends this entry now: right away when idle, into the running turn when it can steer, otherwise after stopping the run. */
+/** Teams send at the next architect turn; single agents steer, or stop first when needed. */
 async function sendQueuedNow(s: Session, id: string): Promise<void> {
   const entry = queueOf(s.id).find(item => item.id === id); if (!entry) return;
-  if (!isRunning(s.id)) { sendFirst.set(s.id, { id }); return dispatchQueue(s.id); }
+  if (teams.get(s.id) || !isRunning(s.id)) { sendFirst.set(s.id, { id }); return dispatchQueue(s.id); }
   if (!teams.get(s.id) && !entry.attachments.length) {
     try { return await steerQueued(s, id); } catch {
       // The run ended meanwhile: send it as the next turn instead.
@@ -4711,8 +4715,7 @@ async function sendQueuedNow(s: Session, id: string): Promise<void> {
   }
   sendFirst.set(s.id, { id, stopping: true, hold: state.queueHolds.get(s.id) });
   runEndings.set(s.id, 'stopped');
-  const team = teams.get(s.id) && !s.remoteDevice;
-  await call(team ? 'architect_control' : 'stop_session', { sessionId: s.id, ...(team ? { action: 'stop' } : {}) });
+  await call('stop_session', { sessionId: s.id });
   notify('Stopping the run to send this message…');
 }
 /** Runs the optional turn-end project check (Settings → Agents) for a clean finish, queueing one repair on failure. */
@@ -4734,15 +4737,16 @@ async function maybeTurnChecks(id: string): Promise<void> {
 }
 /** Sends a task's next queued message once it is idle and its queue is not held (Send now skips the hold). */
 async function dispatchQueue(id: string): Promise<void> {
-  if (!queueOf(id).length) return;
+  if (!queueOf(id).length && !state.queueBusy.has(id)) return;
   await ensureBotProjects();
+  if (state.queueBusy.has(id)) { pendingQueueDispatches.add(id); return; }
   const task = state.sessions.find(item => item.id === id);
   const first = sendFirst.get(id), next = queueOf(id).find(item => item.id === first?.id) ?? queueOf(id)[0];
   if (first && next?.id !== first.id) sendFirst.delete(id);
   // The open thread's team may not be known yet: like sendDraft, wait for its load (openThread dispatches again then),
   // so a team thread's message never goes out as a plain one.
   if (id === state.sessionId && threadLoading()) return;
-  if (!task || !next || botProjects.has(task.projectId) || (state.queueHolds.has(id) && next.id !== first?.id) || state.queueBusy.has(id) || steeringQueued.has(next.id) || next.id === state.queueEditing || isRunning(id) || finishingStreams.has(id) || configuringSessions.has(id) || task.archived) return;
+  if (!task || !next || botProjects.has(task.projectId) || (state.queueHolds.has(id) && next.id !== first?.id) || state.queueBusy.has(id) || steeringQueued.has(next.id) || next.id === state.queueEditing || (!task.remoteDevice && teamActive(teams.get(id)) ? state.streams.has(id) : isRunning(id)) || finishingStreams.has(id) || configuringSessions.has(id) || task.archived) return;
   if (limitActive(task)) { state.queueHolds.set(id, 'limited'); if (id === state.sessionId) renderComposer(); return; }
   state.queueBusy.add(id);
   try {
@@ -4750,15 +4754,20 @@ async function dispatchQueue(id: string): Promise<void> {
     const entry = await call<QueuedMessage>('queue_take', { id: next.id });
     setQueue(id, queueOf(id).filter(item => item.id !== entry.id));
     await deliverQueued(task, entry);
+    if (next.id === first?.id && queueOf(id).some(item => item.id === entry.id)) sendFirst.set(id, first);
   } catch (error) {
     state.queueHolds.set(id, 'failed'); if (!remoteRefusal(task, error)) notifyError(errorText(error));
-  } finally { state.queueBusy.delete(id); if (id === state.sessionId) renderComposer(); renderNavigation(); }
+  } finally {
+    state.queueBusy.delete(id); if (id === state.sessionId) renderComposer(); renderNavigation();
+    if (pendingQueueDispatches.delete(id)) run(dispatchQueue(id));
+  }
 }
 /** Starts a turn with a queued message, for the open task or one in the background. */
 async function deliverQueued(task: Session, entry: QueuedMessage): Promise<void> {
   const promptItems = entry.attachments.filter(item => item.kind !== 'path') as unknown as ReturnType<typeof attachments.list>;
   const paths = entry.attachments.flatMap(item => item.kind === 'path' ? [item.path] : []);
   let sent: Message | undefined;
+  const activeTeam = !task.remoteDevice && teamActive(teams.get(task.id));
   try {
     const files = await Promise.all(paths.map(async path => { const content = await projectFileText(task, path); return `\n\nFile context: ${path}\n\`\`\`\n${content.slice(0, 32768)}\n\`\`\``; }));
     // A side thread's queued follow-up carries the main thread's news like any /btw message.
@@ -4768,7 +4777,9 @@ async function deliverQueued(task: Session, entry: QueuedMessage): Promise<void>
     task.lastPromptAt = sentAt; task.draft = false; pendingPromptActivity.set(task.id, sentAt);
     // Published: text typed since the message was queued is the thread's own now, not its project's New task text.
     state.drafts.reclaim(task.id);
-    stream(task.id).lastPromptAt = sentAt; stream(task.id).startedAt = Math.min(stream(task.id).startedAt, sentAt); stream(task.id).status = 'Starting agent'; task.status = 'running'; task.taskStage = 'in_progress'; task.completedAt = null;
+    // Active teams report architect activity themselves; a busy refusal must keep any live stream.
+    if (!activeTeam) { stream(task.id).lastPromptAt = sentAt; stream(task.id).startedAt = Math.min(stream(task.id).startedAt, sentAt); stream(task.id).status = 'Starting agent'; }
+    task.status = 'running'; task.taskStage = 'in_progress'; task.completedAt = null;
     sent = sentPrompt(task, content, sentAt);
     if (task.id === state.sessionId) { state.messages = [...state.messages, sent]; render(); } else renderNavigation();
     btwPanel.sent(task.id, sent);
@@ -4776,13 +4787,21 @@ async function deliverQueued(task: Session, entry: QueuedMessage): Promise<void>
     // Recorded once sent, unless a New side thread replaced the link meanwhile.
     if (btw && context && readLinks(localStorage)[btw.main.id]?.sideId === task.id) writeLink(localStorage, btw.main.id, { ...readLinks(localStorage)[btw.main.id], seenId: context.link.seenId });
   } catch (error) {
-    // Put it back at the front and hold, so nothing is lost or sent out of order.
-    pendingPromptActivity.delete(task.id); state.streams.delete(task.id); task.status = 'idle'; if (sent) dropMirrorPrompt(task.id, sent);
+    const busy = activeTeam && (error instanceof Error ? error.message : String(error)) === 'The architect is still working; the message stays queued.';
+    // Put it back at the front; an active architect will retry when its turn ends.
+    pendingPromptActivity.delete(task.id);
+    if (!busy) state.streams.delete(task.id);
+    if (!state.streams.has(task.id)) task.status = 'idle';
+    if (sent) dropMirrorPrompt(task.id, sent);
     // A synthetic entry (no id, e.g. continuing after a limit) was never queued.
     if (entry.id) {
       const restored = await call<QueuedMessage>('queue_restore', { entry }).catch(() => null);
       if (restored) setQueue(task.id, [restored, ...queueOf(task.id).filter(item => item.id !== restored.id)]);
       else notifyError('A queued message could not be put back; it was not sent.');
+    }
+    if (busy) {
+      if (sent && task.id === state.sessionId) { state.messages = state.messages.filter(message => message !== sent); renderTranscript(true); }
+      return;
     }
     state.queueHolds.set(task.id, 'failed');
     throw error;
@@ -4816,7 +4835,10 @@ async function continueAfterLimit(task: Session, text = 'Continue where you left
     await deliverQueued(task, { id: '', sessionId: task.id, position: 0, text, attachments: [], createdAt: at, updatedAt: at });
     task.limitedAt = null; task.limitedUntil = null;
   } catch (error) { notifyError(errorText(error)); }
-  finally { state.queueBusy.delete(task.id); if (task.id === state.sessionId) renderComposer(); renderNavigation(); }
+  finally {
+    state.queueBusy.delete(task.id); if (task.id === state.sessionId) renderComposer(); renderNavigation();
+    if (pendingQueueDispatches.delete(task.id)) run(dispatchQueue(task.id));
+  }
 }
 /** The harness's other named connections a limited task can continue on (issue #137). */
 function limitAlternatives(s: Session): { id: string; name: string }[] {

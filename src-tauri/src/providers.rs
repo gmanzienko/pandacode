@@ -159,6 +159,9 @@ pub struct RunConfig {
     pub goal: Option<crate::goal_state::GoalRequest>,
     /// Validated per-task settings applied before any new Codex turn.
     pub codex_settings: Option<Value>,
+    /// A team worker's required Codex speed tier key: the run refuses to go on without it
+    /// rather than fall back to the model's default speed. None for every other task.
+    pub required_tier: Option<String>,
     /// Only native-validated, managed screenshot paths; never arbitrary web content.
     pub images: Vec<PathBuf>,
 }
@@ -649,9 +652,10 @@ pub struct ModelInfo {
     pub reasoning_efforts: Vec<ReasoningEffortInfo>,
     pub default_reasoning_effort: Option<String>,
     pub context_window: Option<u64>,
-    /// Faster service tiers beyond the standard speed (Codex `serviceTiers`, Claude fast mode).
+    /// Codex only: every speed tier its catalog lists (key, name and description as the catalog
+    /// gives them), offered to teams as `<model>@<key>` variants and in the Speed choices.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub speed_tiers: Vec<ReasoningEffortInfo>,
+    pub speed_tiers: Vec<crate::command_operations::ServiceTier>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -1302,6 +1306,10 @@ fn parse_codex_models(result: &Value) -> Result<Vec<ModelInfo>, String> {
         if entry["hidden"] == true {
             continue;
         }
+        // `default` runs the catalog's default model, so it offers that model's speed tiers.
+        if entry["isDefault"] == true {
+            models[0].speed_tiers = crate::command_operations::catalog_tiers(entry);
+        }
         let model = entry["model"].as_str().or_else(|| entry["id"].as_str());
         if let Some(model) = model.filter(|model| valid_model_id(model)) {
             if !models.iter().any(|m| m.id == model) {
@@ -1329,6 +1337,7 @@ fn parse_codex_models(result: &Value) -> Result<Vec<ModelInfo>, String> {
                     .filter(|id| efforts.iter().any(|effort| effort.id == *id))
                     .map(str::to_owned);
                 models.push(ModelInfo {
+                    speed_tiers: crate::command_operations::catalog_tiers(entry),
                     id: model.into(),
                     name: model_text(
                         entry["displayName"]
@@ -1342,28 +1351,11 @@ fn parse_codex_models(result: &Value) -> Result<Vec<ModelInfo>, String> {
                     default_reasoning_effort: default_effort,
                     // model/list does not report the effective window. Live usage does.
                     context_window: None,
-                    speed_tiers: codex_speed_tiers(&entry["serviceTiers"]),
                 });
             }
         }
     }
     Ok(models)
-}
-
-/// Every tier Codex reports, so new ones (Ultra Fast) appear without a release.
-fn codex_speed_tiers(tiers: &Value) -> Vec<ReasoningEffortInfo> {
-    let mut found: Vec<ReasoningEffortInfo> = Vec::new();
-    for tier in tiers.as_array().into_iter().flatten().take(8) {
-        let Some(id) = tier["id"].as_str().filter(|id| valid_service_tier(id)) else { continue };
-        if !found.iter().any(|known| known.id == id) {
-            found.push(ReasoningEffortInfo {
-                id: id.into(),
-                name: model_text(tier["name"].as_str(), id, 64),
-                description: model_text(tier["description"].as_str(), "", 500),
-            });
-        }
-    }
-    found
 }
 
 pub(crate) fn valid_service_tier(id: &str) -> bool {
@@ -1433,7 +1425,7 @@ fn parse_claude_models(result: &Value) -> Result<Vec<ModelInfo>, String> {
         let model = ModelInfo {
             // Claude Code's catalog flags the models it can run in fast mode.
             speed_tiers: if entry["supportsFastMode"] == true {
-                vec![ReasoningEffortInfo { id: "fast".into(), name: "Fast".into(), description: "Claude Code fast mode: faster output at a higher price.".into() }]
+                vec![crate::command_operations::ServiceTier { id: "fast".into(), key: "fast".into(), name: "Fast".into(), description: "Claude Code fast mode: faster output at a higher price.".into() }]
             } else {
                 Vec::new()
             },
@@ -4468,6 +4460,7 @@ mod tests {
 
     pub(super) fn config(provider: &str) -> RunConfig {
         RunConfig {
+            required_tier: None,
             session_id: "local".into(),
             provider: provider.into(),
             model: "default".into(),
@@ -5805,7 +5798,7 @@ mod tests {
         assert!(serde_json::to_value(&models[2]).unwrap().get("speedTiers").is_none());
         assert_eq!(serde_json::to_value(&models[1]).unwrap()["speedTiers"][1]["id"], "ultrafast");
         let many: Vec<_> = (0..20).map(|n| json!({"id":format!("t{n}")})).collect();
-        assert_eq!(parse_codex_models(&json!({"data":[{"model":"m","serviceTiers":many}]})).unwrap()[1].speed_tiers.len(), 8);
+        assert_eq!(parse_codex_models(&json!({"data":[{"model":"m","serviceTiers":many}]})).unwrap()[1].speed_tiers.len(), 16);
 
         let claude = parse_claude_models(&json!({"models":[{"value":"opus","supportsFastMode":true},{"value":"haiku"}]})).unwrap();
         assert_eq!(claude[1].speed_tiers.iter().map(|tier| tier.id.as_str()).collect::<Vec<_>>(), ["fast"]);
@@ -5826,6 +5819,22 @@ mod tests {
         for (provider, settings) in [("claude", None), ("claude", Some(json!({"serviceTier":null}))), ("glm", Some(json!({"serviceTier":"fast"})))] {
             assert!(!args(provider, settings).iter().any(|arg| arg == "--settings"));
         }
+    }
+
+    #[test]
+    fn model_catalog_lists_every_speed_tier_with_its_key() {
+        let models = parse_codex_models(&json!({"data":[
+            {"model":"sol","isDefault":true,"serviceTiers":[{"id":"priority","name":"Fast","description":"2x speed"},{"id":"turbo","name":"Turbo Max","description":"Fictional."}]},
+            {"model":"luna","serviceTiers":[{"id":"priority","name":"Fast"}]},
+            {"model":"plain","serviceTiers":[]},
+            {"model":"old"}
+        ]}))
+        .unwrap();
+        let tiers: Vec<(&str, Vec<(&str, &str)>)> = models.iter().map(|m| (m.id.as_str(), m.speed_tiers.iter().map(|t| (t.key.as_str(), t.name.as_str())).collect())).collect();
+        assert_eq!(tiers, [("default", vec![("fast", "Fast"), ("turbo-max", "Turbo Max")]), ("sol", vec![("fast", "Fast"), ("turbo-max", "Turbo Max")]), ("luna", vec![("fast", "Fast")]), ("plain", vec![]), ("old", vec![])]);
+        // Sent to the window only when there are any.
+        assert_eq!(serde_json::to_value(&models[1]).unwrap()["speedTiers"][1], json!({"id":"turbo","key":"turbo-max","name":"Turbo Max","description":"Fictional."}));
+        assert!(serde_json::to_value(&models[3]).unwrap().get("speedTiers").is_none());
     }
 
     #[test]
@@ -6420,6 +6429,7 @@ read -r a; echo '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}
                 "What exact token did you reply in your preceding answer? Reply only with that token. Do not use tools or modify files."
             };
             let cfg = RunConfig {
+                required_tier: None,
                 session_id: format!("smoke-{provider}"),
                 provider: provider.clone(),
                 model: model.clone(),
