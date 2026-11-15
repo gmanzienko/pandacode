@@ -356,8 +356,11 @@ mod tests {
         assert!(args.iter().any(|a| a == &format!("UserKnownHostsFile={}", known.display())));
         assert!(args.contains(&"ConnectTimeout=20".to_string()));
         // The mux socket name is relative so the path stays short; the command runs in the
-        // app-data dir.
+        // app-data dir. Windows OpenSSH has no ControlMaster, so it gets none of the triple.
+        #[cfg(not(windows))]
         assert!(args.contains(&"ControlPath=ssh-%C".to_string()));
+        #[cfg(windows)]
+        assert!(!args.iter().any(|arg| arg.starts_with("Control")), "{args:?}");
         assert_eq!(&args[args.len() - 4..], &["root@203.0.113.7".to_string(), "sh".into(), "-c".into(), "'echo hi && ls'".into()]);
     }
 

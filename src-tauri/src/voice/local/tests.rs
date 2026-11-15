@@ -85,7 +85,17 @@ fn echo_command() -> WorkerCommand {
 fn alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn alive(pid: u32) -> bool {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows::Win32::Foundation::{HANDLE, WAIT_TIMEOUT};
+    use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+    // SAFETY: the test owns this child; the handle is owned and the wait only polls.
+    let Ok(handle) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }) else { return false };
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle.0) };
+    unsafe { WaitForSingleObject(HANDLE(handle.as_raw_handle()), 0) == WAIT_TIMEOUT }
+}
+#[cfg(not(any(unix, windows)))]
 fn alive(_pid: u32) -> bool {
     false
 }

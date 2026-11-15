@@ -113,25 +113,27 @@ async fn account_change_during_fetch_discards_old_response() {
 #[test]
 fn connection_environment_selects_its_own_config_folder_and_login() {
     let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
+    // Windows requires a drive-qualified absolute path.
+    let work_dir = if cfg!(windows) { r"C:\Users\me\.claude-work" } else { "/Users/me/.claude-work" };
     let work = [
         pair("CLAUDE_CONFIG_DIR", "/tmp/old"),
-        pair("CLAUDE_CONFIG_DIR", "/Users/me/.claude-work"),
+        pair("CLAUDE_CONFIG_DIR", work_dir),
     ];
     // The connection's last value wins; anything it doesn't set comes from PandaCode's environment.
     assert_eq!(
         var(&work, "CLAUDE_CONFIG_DIR").as_deref(),
-        Some("/Users/me/.claude-work")
+        Some(work_dir)
     );
     assert_eq!(var(&work, "PATH"), std::env::var("PATH").ok());
     let launched = crate::agent_usage_claude_env::ClaudeEnv::launch(&work);
-    assert_eq!(launched.config_dir(), Some(PathBuf::from("/Users/me/.claude-work")));
+    assert_eq!(launched.config_dir(), Some(PathBuf::from(work_dir)));
     assert_eq!(crate::agent_usage_claude_env::ClaudeEnv::launch(&[pair("CLAUDE_CONFIG_DIR", "relative")]).config_dir(), None);
     // Cost estimates resolve the folder the same way as the limits.
     assert_eq!(crate::agent_usage_claude_env::ClaudeEnv::launch(&[]).config_dir(), claude_config_dir());
     #[cfg(target_os = "macos")]
     assert_eq!(
         crate::agent_usage_claude::claude_service(var(&work, "CLAUDE_CONFIG_DIR").as_deref(), None),
-        crate::agent_usage_claude::claude_service(Some("/Users/me/.claude-work"), None)
+        crate::agent_usage_claude::claude_service(Some(work_dir), None)
     );
 }
 

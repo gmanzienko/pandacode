@@ -552,7 +552,12 @@ mod tests {
             }
         }
         protocol.host = Some(tools);
-        let mut cat = Command::new("/bin/cat").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).kill_on_drop(true).spawn().unwrap();
+        // `more` holds stdin open the way `cat` does; Windows has no /bin/cat.
+        #[cfg(windows)]
+        let (program, args): (&str, &[&str]) = ("cmd.exe", &["/C", "more"]);
+        #[cfg(not(windows))]
+        let (program, args): (&str, &[&str]) = ("/bin/cat", &[]);
+        let mut cat = Command::new(program).args(args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).kill_on_drop(true).spawn().unwrap();
         let mut stdin = cat.stdin.take().unwrap();
         let sink: Sink = Arc::new(|_| {});
         let (mut jobs, mut queued) = (tokio::task::JoinSet::new(), VecDeque::new());

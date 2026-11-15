@@ -737,11 +737,13 @@ mod tests {
 
     #[test]
     fn tool_image_cache_key_is_the_resolved_path() {
-        let relative = crate::tool_images::relative_spellings(Path::new("a.png"), Path::new("/w"));
-        assert_eq!(cache_key("a.png", &relative), "/w/a.png");
-        let other = crate::tool_images::relative_spellings(Path::new("a.png"), Path::new("/v"));
+        let root = std::env::temp_dir();
+        let relative = crate::tool_images::relative_spellings(Path::new("a.png"), &root.join("w"));
+        assert_eq!(cache_key("a.png", &relative), root.join("w").join("a.png").to_string_lossy());
+        let other = crate::tool_images::relative_spellings(Path::new("a.png"), &root.join("v"));
         assert_ne!(cache_key("a.png", &relative), cache_key("a.png", &other));
-        assert_eq!(cache_key("/tmp/a.png", &path_spellings("/tmp/a.png")), "/tmp/a.png");
+        let absolute = root.join("a.png").to_string_lossy().into_owned();
+        assert_eq!(cache_key(&absolute, &path_spellings(&absolute)), absolute);
         assert_eq!(cache_key("a.png", &["a.png".to_owned()]), "a.png");
     }
 

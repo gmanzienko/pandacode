@@ -585,7 +585,15 @@ async fn claude_code_is_not_run_while_another_claude_code_holds_its_refresh_lock
     assert_eq!((setup.run().await.cause, runs(&cli)), (Some(Cause::Expired), 0), "held: no second refresher");
     // Not touched for over a minute: stale, so Claude Code runs.
     let old = std::time::SystemTime::now() - Duration::from_secs(90);
-    std::fs::File::open(&lock).unwrap().set_modified(old).unwrap();
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+        options.write(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0);
+    }
+    options.open(&lock).unwrap().set_modified(old).unwrap();
     assert_eq!((setup.run().await.status.as_str(), runs(&cli)), ("ready", 1));
 }
 

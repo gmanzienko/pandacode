@@ -28,11 +28,14 @@ fn rel(path: &str) -> Requested {
 
 #[test]
 fn tool_image_requested_path_rules() {
-    assert_eq!(requested_path("/tmp/shot.png").unwrap(), abs("/tmp/shot.png"));
+    let root = std::env::temp_dir();
+    let shot = root.join("shot.png");
+    assert_eq!(requested_path(&shot.to_string_lossy()).unwrap(), Requested::Absolute(shot));
+    #[cfg(unix)]
     assert_eq!(requested_path("file:///tmp/Shot.PNG").unwrap(), abs("/tmp/Shot.PNG"));
-    assert!(requested_path(" /a/b.JPEG ").is_ok());
-    assert!(requested_path("/a/b.webp").is_ok());
-    assert!(requested_path("/a/b.gif").is_ok());
+    for name in ["b.JPEG", "b.webp", "b.gif"] {
+        assert!(requested_path(&format!(" {} ", root.join(name).display())).is_ok());
+    }
     assert_eq!(requested_path("shot.png").unwrap(), rel("shot.png"));
     assert_eq!(requested_path(".pandacode/progress-shots/x.png").unwrap(), rel(".pandacode/progress-shots/x.png"));
     assert_eq!(requested_path("./test-results/a b.png").unwrap(), rel("./test-results/a b.png"));
@@ -248,8 +251,9 @@ fn tool_image_refuses_autofs_network_mounts() {
     for raw in ["/net/host/share/x.png", "/Network/Servers/host/x.png", "/NET/host/x.png", "file:///network/x.png", "/net/x.png"] {
         assert_eq!(requested_path(raw).unwrap_err(), ERR_NETWORK, "{raw}");
     }
-    for raw in ["/netx/a.png", "/Users/me/net/a.png", "net/a.png", "/Networks/a.png"] {
-        assert!(requested_path(raw).is_ok(), "{raw}");
+    for relative in ["netx/a.png", "Users/me/net/a.png", "net/a.png", "Networks/a.png"] {
+        let path = std::env::temp_dir().join(relative);
+        assert!(requested_path(&path.to_string_lossy()).is_ok(), "{}", path.display());
     }
     assert!(is_autofs_path(Path::new("/net")) && is_autofs_path(Path::new("/Network")));
     assert!(!is_autofs_path(Path::new("/tmp/net/a.png")));
@@ -282,10 +286,15 @@ fn tool_image_full_size_checks_dimensions_before_serving() {
 
 #[test]
 fn tool_image_relative_spellings() {
-    let spellings = relative_spellings(Path::new("./a/b.png"), Path::new("/w"));
-    assert_eq!(spellings, vec!["./a/b.png", "a/b.png", "/w/a/b.png"]);
-    let spellings = relative_spellings(Path::new("b.png"), Path::new("/tmp/w"));
-    assert_eq!(spellings, vec!["b.png", "./b.png", "/tmp/w/b.png", "/private/tmp/w/b.png"]);
+    let root = std::env::temp_dir().join("w");
+    let spellings = relative_spellings(Path::new("./a/b.png"), &root);
+    let mut expected = vec!["./a/b.png".to_owned(), "a/b.png".to_owned()];
+    expected.extend(path_spellings(&root.join("a/b.png").to_string_lossy()));
+    assert_eq!(spellings, expected);
+    let spellings = relative_spellings(Path::new("b.png"), &root);
+    let mut expected = vec!["b.png".to_owned(), "./b.png".to_owned()];
+    expected.extend(path_spellings(&root.join("b.png").to_string_lossy()));
+    assert_eq!(spellings, expected);
 }
 
 fn png_of(width: u32, height: u32, alpha: bool) -> Vec<u8> {
@@ -518,7 +527,7 @@ fn tool_image_opens_without_following_a_final_link() {
 #[test]
 fn tool_image_opened_file_must_stay_in_the_checkout() {
     let dir = temp_dir("opened-within");
-    let (root, elsewhere) = (dir.join("repo"), dir.join("elsewhere"));
+    let (root, elsewhere) = (dir.join("repo"), dir.join("repo-sibling"));
     std::fs::create_dir_all(&root).unwrap();
     std::fs::create_dir_all(&elsewhere).unwrap();
     std::fs::write(elsewhere.join("x.png"), PNG).unwrap();
@@ -704,4 +713,120 @@ fn tool_image_only_completed_unrefused_records_authorize() {
     }
     assert!(!names(with_status("screenshot", "failed", Value::Null, "Saved to /tmp/shot.png")));
     assert!(!names(with_status("Read", "failed", Value::String("/tmp/shot.png".into()), "")));
+}
+
+
+#[cfg(windows)]
+#[test]
+fn tool_image_windows_drive_namespaces_are_local_only_when_rooted() {
+    for raw in [r"C:\tmp\a.png", r"\\?\C:\tmp\a.png"] {
+        assert_eq!(requested_path(raw).unwrap(), abs(raw));
+    }
+    for raw in [r"\\?\UNC\host\share\a.png", r"\\host\share\a.png",
+        r"\\.\C:\a.png", r"\\?\GLOBALROOT\Device\HarddiskVolume1\a.png",
+        r"\\?\Volume{00000000-0000-0000-0000-000000000000}\a.png",
+        r"\\?\C:a.png", r"//?/C:/a.png", r"\\?\C:/a.png", r"\/host\a.png"] {
+        assert!(requested_path(raw).is_err(), "{raw}");
+        assert!(refuse_network_hops(Path::new(raw)).is_err(), "{raw}");
+    }
+    assert!(requested_path(r"C:a.png").is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn tool_image_windows_handle_paths_grow_and_preserve_unicode() {
+    let dir = temp_dir("handle-unicode");
+    let deep = dir.join("long-segment".repeat(10)).join("second-segment".repeat(10));
+    std::fs::create_dir_all(&deep).unwrap();
+    let path = deep.join("画像-ёж.png");
+    std::fs::write(&path, PNG).unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(opened_path(&file).unwrap(), path.canonicalize().unwrap());
+    assert!(check_opened(&file, Some(&dir)).is_ok());
+    let ordinary = dunce::simplified(&path);
+    assert!(matches!(requested_path(&ordinary.to_string_lossy()), Ok(Requested::Absolute(_))));
+    assert!(encode(ordinary, TOOL_IMAGE_LIMIT).is_ok());
+    assert!(encode(&path, TOOL_IMAGE_LIMIT).is_ok());
+    assert!(check_opened(&file, Some(dunce::simplified(&dir))).is_ok());
+    let sibling = dir.join("other-checkout");
+    std::fs::create_dir(&sibling).unwrap();
+    assert_eq!(check_opened(&file, Some(&sibling)).unwrap_err(), ERR_OUTSIDE);
+    drop(file);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn tool_image_windows_unresolved_handle_fails_closed_even_without_checkout() {
+    let file = File::open("NUL").unwrap();
+    assert!(opened_path(&file).is_none());
+    assert_eq!(check_opened(&file, None).unwrap_err(), ERR_MISSING);
+}
+
+#[cfg(windows)]
+#[test]
+fn tool_image_windows_network_links_are_refused_before_resolving_root_or_file() {
+    use std::os::windows::fs::symlink_dir;
+    let dir = temp_dir("network-links");
+    let link = dir.join("network");
+    symlink_dir(r"\\127.0.0.1\pandacode-must-not-contact", &link).unwrap();
+    assert_eq!(refuse_network_hops(&link.join("x.png")).unwrap_err(), ERR_NETWORK);
+    assert_eq!(resolve_relative(&link, Path::new("x.png")).unwrap_err(), ERR_NETWORK);
+    let viewed = std::cell::Cell::new(false);
+    assert_eq!(load("x.png", || Ok(link.clone()), |_| { viewed.set(true); Ok(true) }, TOOL_IMAGE_LIMIT).unwrap_err(), ERR_NETWORK);
+    assert!(!viewed.get());
+    std::fs::remove_dir(&link).unwrap();
+    let local = dir.join("local");
+    std::fs::create_dir(&local).unwrap();
+    std::fs::write(local.join("x.png"), PNG).unwrap();
+    symlink_dir(&local, &link).unwrap();
+    assert!(encode(&link.join("x.png"), TOOL_IMAGE_LIMIT).is_ok());
+    std::fs::remove_dir(&link).unwrap();
+    symlink_dir(&link, &link).unwrap();
+    assert_eq!(refuse_network_hops(&link.join("x.png")).unwrap_err(), ERR_MISSING);
+    std::fs::remove_dir(&link).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+
+#[cfg(windows)]
+#[test]
+fn tool_image_windows_drive_mapping_fails_closed() {
+    for device in [r"\Device\HarddiskVolume1", r"\Device\CdRom0", r"\Device\Ramdisk1"] {
+        assert!(windows_local_device(device), "{device}");
+    }
+    for device in ["", r"\Device\HarddiskVolume", r"\Device\HarddiskVolume1\path",
+        r"\Device\Mup\host\share", r"\Device\LanmanRedirector\host\share",
+        r"\??\UNC\host\share", r"\??\C:\subst", r"\Device\Unknown1"] {
+        assert!(!windows_local_device(device), "{device}");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn tool_image_windows_junctions_validate_every_target() {
+    let dir = temp_dir("junction");
+    let local = dir.join("local");
+    let junction = dir.join("junction");
+    std::fs::create_dir(&local).unwrap();
+    std::fs::write(local.join("x.png"), PNG).unwrap();
+    let made = std::process::Command::new("cmd").args(["/d", "/c", "mklink", "/J"])
+        .arg(dunce::simplified(&junction)).arg(dunce::simplified(&local)).output().unwrap();
+    assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+    assert!(refuse_network_hops(&junction.join("x.png")).is_ok());
+    assert!(encode(&junction.join("x.png"), TOOL_IMAGE_LIMIT).is_ok());
+    let network = local.join("network");
+    std::os::windows::fs::symlink_dir(r"\\127.0.0.1\pandacode-must-not-contact", &network).unwrap();
+    assert_eq!(refuse_network_hops(&junction.join("network/x.png")).unwrap_err(), ERR_NETWORK);
+    std::fs::remove_dir(network).unwrap();
+    std::fs::remove_dir(junction).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn tool_image_windows_missing_ancestors_are_not_treated_as_local() {
+    let dir = temp_dir("missing-ancestor");
+    assert_eq!(refuse_network_hops(&dir.join("missing/x.png")).unwrap_err(), ERR_MISSING);
+    std::fs::remove_dir_all(dir).unwrap();
 }

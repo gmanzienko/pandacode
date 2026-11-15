@@ -82,7 +82,8 @@ mod tests {
 
     #[test]
     fn variables_are_layered_as_claude_is_launched() {
-        let saved = [pair("ANTHROPIC_API_KEY", "saved-key"), pair("CLAUDE_CONFIG_DIR", "/saved"), pair("HTTPS_PROXY", "p")];
+        let saved_dir = if cfg!(windows) { "C:/saved" } else { "/saved" };
+        let saved = [pair("ANTHROPIC_API_KEY", "saved-key"), pair("CLAUDE_CONFIG_DIR", saved_dir), pair("HTTPS_PROXY", "p")];
         let inherit = env(Mode::Inherit, &saved, &[]);
         assert_eq!(inherit.get("ANTHROPIC_API_KEY").as_deref(), Some("saved-key"));
         assert_eq!(inherit.get("ANTHROPIC_BASE_URL").as_deref(), Some("https://ambient.example"));
@@ -91,7 +92,7 @@ mod tests {
         assert_eq!(subscription.get("ANTHROPIC_API_KEY"), None);
         assert_eq!(subscription.get("ANTHROPIC_BASE_URL"), None);
         assert_eq!(subscription.get("HTTPS_PROXY").as_deref(), Some("p"));
-        assert_eq!(subscription.config_dir(), Some(PathBuf::from("/saved")));
+        assert_eq!(subscription.config_dir(), Some(PathBuf::from(saved_dir)));
         // A connection's own variables are applied after that, and win; the last value counts.
         let connection = [pair("ANTHROPIC_API_KEY", "a"), pair("ANTHROPIC_API_KEY", "b"), pair("CLAUDE_CONFIG_DIR", "relative")];
         let named = env(Mode::Subscription, &saved, &connection);

@@ -136,6 +136,7 @@ mod tests {
         assert_eq!(sentence(""), "");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_linux_note_uses_the_first_program_found_with_the_text_as_one_argument() {
         use std::path::PathBuf;
@@ -153,6 +154,7 @@ mod tests {
         assert_eq!(notifier(body, |_| Some(PathBuf::from("zenity"))), None);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_linux_note_programs_come_only_from_usr_bin_or_bin() {
         use std::path::{Path, PathBuf};

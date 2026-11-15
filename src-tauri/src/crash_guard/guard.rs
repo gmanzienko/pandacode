@@ -543,9 +543,24 @@ mod tests {
         assert_eq!(launched.into_inner(), [vec!["--x".to_string(), format!("--crash-restart={NOW}")]]);
         let notice = pending(&dir);
         assert!(notice.has_report && notice.relaunching && !notice.restarts_paused);
+        #[cfg(unix)]
         assert_eq!(notice.summary.as_deref(), Some("Crashed with SIGSEGV"));
+        #[cfg(windows)]
+        assert_eq!(notice.summary, None, "an unnamed Unix signal is not public");
         assert_eq!(state::load::<GuardState>(&dir.join(state::STATE_FILE)).crashes, [CrashRecord { at: NOW, startup: false }]);
         assert!(report::newest(&dir).is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_exception_relaunches_with_a_public_cause() {
+        let dir = temp_dir();
+        let outcome = conclude(&config(&dir, true), &pipe(b"", true), ExitStatus::Code(0xC000_0005), NOW, || (), |_| Ok(()));
+        assert_eq!(outcome, Outcome::Relaunched);
+        let notice = pending(&dir);
+        assert!(notice.relaunching && notice.has_report);
+        assert_eq!(notice.summary.as_deref(), Some("Crashed with an access violation"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -852,7 +867,10 @@ mod tests {
         assert_eq!(conclude(&serve, &pipe(b"signal 6\n", true), ExitStatus::Unknown, NOW + 1, || (), |_| Ok(())), Outcome::Relaunched);
         let serve_notice = state::take_pending(&dir, Mode::Serve, NOW + 1).unwrap();
         assert_eq!(serve_notice.summary.as_deref(), Some("Crashed with SIGABRT"));
+        #[cfg(unix)]
         assert_eq!(pending(&dir).summary.as_deref(), Some("Crashed with SIGSEGV"));
+        #[cfg(windows)]
+        assert_eq!(pending(&dir).summary, None, "an unnamed Unix signal is not public");
         for mode in [Mode::Desktop, Mode::Serve] {
             assert_eq!(state::load::<GuardState>(&state::state_path(&dir, mode)).crashes.len(), 1, "{mode:?}");
         }

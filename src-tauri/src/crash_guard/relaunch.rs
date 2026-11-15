@@ -329,6 +329,7 @@ mod tests {
         assert_eq!(Mode::parse(Mode::Serve.as_str()), Some(Mode::Serve));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn appimage_is_trusted_only_from_inside_its_own_mount() {
         let image = Some(std::ffi::OsStr::new("/home/u/Apps/PandaCode.AppImage"));
@@ -350,6 +351,7 @@ mod tests {
         assert_eq!(trusted_appimage(None, None, mounted, temp, exists), None);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_broad_appdir_is_not_a_mount_point() {
         let image = Some(std::ffi::OsStr::new("/home/u/Apps/Other.AppImage"));

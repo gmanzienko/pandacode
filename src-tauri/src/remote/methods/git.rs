@@ -1350,6 +1350,7 @@ mod tests {
         let root = std::fs::canonicalize(root).unwrap();
         for args in [
             vec!["init", "-b", "main"],
+            vec!["config", "core.autocrlf", "false"],
             vec!["config", "user.name", "Tests"],
             vec!["config", "user.email", "tests@example.invalid"],
             vec!["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", "commit", "--allow-empty", "-m", "Initial"],
@@ -1590,7 +1591,12 @@ mod tests {
     /// A real checkout: `tracked.txt` committed then edited, `new.txt` untracked.
     fn discard_repo() -> PathBuf {
         let root = repo();
-        let git = |args: &[&str]| assert!(Command::new("git").args(args).current_dir(&root).output().unwrap().status.success(), "{args:?}");
+        let git = |args: &[&str]| {
+            let mut command = Command::new("git");
+            #[cfg(windows)]
+            command.args(["-c", "core.longpaths=true"]);
+            assert!(command.args(args).current_dir(&root).output().unwrap().status.success(), "{args:?}");
+        };
         std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
         git(&["add", "tracked.txt"]);
         git(&["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", "commit", "-m", "Tracked"]);

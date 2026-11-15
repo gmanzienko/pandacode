@@ -18,9 +18,43 @@ pub(crate) fn root() -> PathBuf {
     crate::agent_usage_providers::home().unwrap_or_else(std::env::temp_dir).join("PandaCode Chats")
 }
 
+// A missing final name is safe only when its existing parent resolves and it is not a dangling link.
+fn canonical_or_missing_leaf(path: &Path) -> Option<PathBuf> {
+    match path.canonicalize() {
+        Ok(path) => Some(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            && std::fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            && matches!(path.components().next_back(), Some(std::path::Component::Normal(_))) =>
+        {
+            Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?))
+        }
+        Err(_) => None,
+    }
+}
+
 fn in_root(folder: &Path, root: &Path) -> bool {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    folder.parent() == Some(root.as_path())
+    if folder.components().any(|part| matches!(part, std::path::Component::ParentDir))
+        || !matches!(folder.components().next_back(), Some(std::path::Component::Normal(_)))
+    {
+        return false;
+    }
+    let Some(resolved_root) = canonical_or_missing_leaf(root) else { return false };
+    if folder.parent() != Some(root) && folder.parent() != Some(resolved_root.as_path()) {
+        return false;
+    }
+    let resolved = match folder.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A dangling link is not a missing chat, and errors other than absence never fall back.
+            if !std::fs::symlink_metadata(folder).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
+                return false;
+            }
+            let Some(parent) = folder.parent().and_then(canonical_or_missing_leaf) else { return false };
+            parent.join(folder.file_name().unwrap())
+        }
+        Err(_) => return false,
+    };
+    resolved.parent() == Some(resolved_root.as_path())
 }
 
 /// Whether a task folder is a projectless chat's.
@@ -96,6 +130,56 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir.join("test.sqlite")).unwrap();
         (dir.clone(), dir.join("PandaCode Chats"), store)
+    }
+
+    #[test]
+    fn raw_and_missing_chat_paths_require_both_direct_parent_boundaries() {
+        let (dir, root, _) = setup();
+        let folder = root.join("Chat 1");
+        assert!(in_root(&folder, &root));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(in_root(&folder, &root));
+        std::fs::create_dir(&folder).unwrap();
+        assert!(in_root(&folder, &root));
+        assert!(in_root(&folder.canonicalize().unwrap(), &root));
+        assert!(!in_root(&root.join("../outside"), &root));
+        assert!(!in_root(&root.join("Chat 1/../escape"), &root));
+        assert!(!in_root(&root.join("nested/Chat 1"), &root));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn chat_links_and_external_aliases_cannot_trigger_cleanup() {
+        #[cfg(windows)]
+        use std::os::windows::fs::symlink_dir as link;
+        #[cfg(unix)]
+        use std::os::unix::fs::symlink as link;
+        let (dir, root, store) = setup();
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let outside = dir.join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let escaping = root.join("escaping");
+        link(&outside, &escaping).unwrap();
+        assert!(!in_root(&escaping, &root));
+        let inside = root.join("inside");
+        std::fs::create_dir(&inside).unwrap();
+        let alias = dir.join("alias");
+        link(&inside, &alias).unwrap();
+        assert!(!in_root(&alias, &root));
+        // A missing leaf below an escaping parent is not a chat either.
+        assert!(!in_root(&escaping.join("missing"), &root));
+        let dangling = root.join("dangling");
+        link(dir.join("missing"), &dangling).unwrap();
+        assert!(!in_root(&dangling, &root));
+        let project = store.add_project(&outside).unwrap();
+        store.db.execute("UPDATE projects SET path=?1 WHERE id=?2", params![escaping.to_string_lossy(), project.id]).unwrap();
+        assert!(!cleanup(&store, &root, &project.id).unwrap());
+        assert!(outside.exists() && store.project(&project.id).is_ok());
+        #[cfg(windows)]
+        { std::fs::remove_dir(escaping).unwrap(); std::fs::remove_dir(alias).unwrap(); std::fs::remove_dir(dangling).unwrap(); }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -62,7 +62,7 @@ const NETWORK_MAGICS: [u32; 7] = [0x6969, 0x517B, 0xFF53_4D42, 0xFE53_4D42, 0x53
 /// macOS automount roots for network shares (`/net/host/share`, `/Network/Servers/…`).
 const AUTOFS_ROOTS: [&str; 2] = ["net", "Network"];
 /// Symlinks followed while checking a path before it counts as a loop (as `SYMLOOP_MAX`).
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_LINK_HOPS: usize = 40;
 /// JPEG quality of downscaled images without transparency.
 const THUMB_JPEG_QUALITY: u8 = 82;
@@ -79,8 +79,16 @@ pub enum Requested {
     Relative(PathBuf),
 }
 
-/// True for UNC and other network spellings: two leading separators of either kind.
+/// Two leading separators are forbidden, except a rooted Windows verbatim drive path.
 pub fn is_network_path(path: &str) -> bool {
+    #[cfg(windows)]
+    if path.starts_with(r"\\?\") && !path.contains('/') && Path::new(path).is_absolute()
+        && matches!(Path::new(path).components().next(), Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), std::path::Prefix::VerbatimDisk(drive) if drive.is_ascii_alphabetic()))
+        && path.as_bytes().get(6) == Some(&b'\\')
+    {
+        return false;
+    }
     let mut chars = path.chars();
     matches!((chars.next(), chars.next()), (Some('/' | '\\'), Some('/' | '\\')))
 }
@@ -146,10 +154,13 @@ pub fn relative_spellings(relative: &Path, root: &Path) -> Vec<String> {
 /// The canonical file a relative request names, refused when it (or a symlink
 /// along the way) leads outside the checkout or into a network mount.
 pub fn resolve_relative(root: &Path, relative: &Path) -> Result<PathBuf, String> {
+    refuse_network_hops(root)?;
     let root = root.canonicalize().map_err(|_| ERR_MISSING.to_string())?;
+    refuse_network_hops(&root)?;
     // A recorded name that links into a network mount is refused before resolving.
     refuse_network_hops(&root.join(relative))?;
     let target = root.join(relative).canonicalize().map_err(|_| ERR_MISSING.to_string())?;
+    refuse_network_hops(&target)?;
     if target.starts_with(&root) {
         Ok(target)
     } else {
@@ -238,6 +249,7 @@ fn encode_within(path: &Path, within: Option<&Path>, limit: u64, max_edge: Optio
 fn open_checked(path: &Path, within: Option<&Path>, limit: u64) -> Result<File, String> {
     refuse_network_hops(path)?;
     let target = path.canonicalize().map_err(|_| ERR_MISSING.to_string())?;
+    refuse_network_hops(&target)?;
     // A link into an automounted share is refused before the file is opened.
     if is_autofs_path(&target) {
         return Err(ERR_NETWORK.into());
@@ -256,6 +268,13 @@ fn open_checked(path: &Path, within: Option<&Path>, limit: u64) -> Result<File, 
     let file = open_no_follow(&target).map_err(|_| ERR_MISSING.to_string())?;
     // Checked again on the open handle, in case the path was swapped in between.
     let metadata = file.metadata().map_err(|_| ERR_MISSING.to_string())?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            return Err(ERR_MISSING.into());
+        }
+    }
     if !metadata.is_file() {
         return Err(ERR_MISSING.into());
     }
@@ -276,6 +295,11 @@ fn open_no_follow(path: &Path) -> std::io::Result<File> {
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT.0);
     }
     options.open(path)
 }
@@ -300,7 +324,28 @@ fn opened_path(file: &File) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn opened_path(file: &File) -> Option<PathBuf> {
+    use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
+    use windows::Win32::{Foundation::HANDLE, Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED}};
+    let mut buffer = vec![0u16; 128];
+    loop {
+        // SAFETY: the handle is borrowed from file and the API receives the buffer's length.
+        let len = unsafe { GetFinalPathNameByHandleW(HANDLE(file.as_raw_handle()), &mut buffer, FILE_NAME_NORMALIZED) } as usize;
+        if len == 0 {
+            return None;
+        }
+        if len < buffer.len() {
+            return Some(PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])));
+        }
+        if len >= 32768 {
+            return None;
+        }
+        buffer.resize(len + 1, 0);
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn opened_path(_file: &File) -> Option<PathBuf> {
     None
 }
@@ -310,17 +355,29 @@ fn opened_path(_file: &File) -> Option<PathBuf> {
 /// Platforms without descriptor paths rely on the checks before the open.
 fn check_opened(file: &File, within: Option<&Path>) -> Result<(), String> {
     let Some(opened) = opened_path(file) else {
+        if cfg!(windows) {
+            return Err(ERR_MISSING.into());
+        }
         if on_network_filesystem(file) {
             return Err(ERR_NETWORK.into());
         }
         let known = cfg!(any(target_os = "macos", target_os = "linux"));
         return if known && within.is_some() { Err(ERR_MISSING.into()) } else { Ok(()) };
     };
+    refuse_network_hops(&opened)?;
     if is_autofs_path(&opened) || on_network_filesystem(file) {
         return Err(ERR_NETWORK.into());
     }
     let Some(root) = within else { return Ok(()) };
-    let root_opened = File::open(root).ok().and_then(|dir| opened_path(&dir));
+    refuse_network_hops(root)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS.0);
+    }
+    let root_opened = options.open(root).ok().and_then(|dir| opened_path(&dir));
     if opened.starts_with(root) || root_opened.is_some_and(|spelled| opened.starts_with(spelled)) {
         Ok(())
     } else {
@@ -330,7 +387,7 @@ fn check_opened(file: &File, within: Option<&Path>) -> Result<(), String> {
 
 /// True when the open file lives on a network filesystem already mounted
 /// somewhere ordinary (an SMB share under `/Volumes`): macOS reads the mount's
-/// `MNT_LOCAL` flag, Linux its filesystem magic. Unknown elsewhere (false).
+/// `MNT_LOCAL` flag, Linux its filesystem magic, Windows its DOS drive mapping.
 #[cfg(target_os = "macos")]
 fn on_network_filesystem(file: &File) -> bool {
     use std::os::unix::io::AsRawFd;
@@ -353,7 +410,12 @@ fn on_network_filesystem(file: &File) -> bool {
     is_network_magic(stat_magic(stat.f_type as i64))
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn on_network_filesystem(file: &File) -> bool {
+    opened_path(file).is_none_or(|path| windows_local_drive(&path).is_err())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn on_network_filesystem(_file: &File) -> bool {
     false
 }
@@ -420,7 +482,91 @@ pub fn refuse_network_hops(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+/// Validate the DOS mapping before even looking up an ancestor. SUBST aliases and
+/// unknown device mappings fail closed rather than hiding a redirect to a share.
+#[cfg(windows)]
+fn windows_local_drive(path: &Path) -> Result<PathBuf, String> {
+    use windows::{core::PCWSTR, Win32::Storage::FileSystem::{GetDriveTypeW, QueryDosDeviceW}};
+    if is_network_path(&path.to_string_lossy()) || !path.is_absolute() {
+        return Err(ERR_NETWORK.into());
+    }
+    let Some(Component::Prefix(prefix)) = path.components().next() else { return Err(ERR_NETWORK.into()) };
+    let drive = match prefix.kind() {
+        std::path::Prefix::Disk(drive) | std::path::Prefix::VerbatimDisk(drive) if drive.is_ascii_alphabetic() => drive,
+        _ => return Err(ERR_NETWORK.into()),
+    };
+    let name = [u16::from(drive), u16::from(b':'), 0];
+    let mut mapping = vec![0u16; 32768];
+    // SAFETY: both slices are valid UTF-16 buffers, and name is NUL-terminated.
+    let len = unsafe { QueryDosDeviceW(PCWSTR(name.as_ptr()), Some(&mut mapping)) } as usize;
+    if len == 0 || len > mapping.len() {
+        return Err(ERR_NETWORK.into());
+    }
+    let end = mapping[..len].iter().position(|ch| *ch == 0).ok_or(ERR_NETWORK)?;
+    let device = String::from_utf16(&mapping[..end]).map_err(|_| ERR_NETWORK)?;
+    if !windows_local_device(&device) {
+        return Err(ERR_NETWORK.into());
+    }
+    let root = [u16::from(drive), u16::from(b':'), u16::from(b'\\'), 0];
+    // DRIVE_REMOVABLE, DRIVE_FIXED, DRIVE_CDROM and DRIVE_RAMDISK only; unknown is refused.
+    if !matches!(unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) }, 2 | 3 | 5 | 6) {
+        return Err(ERR_NETWORK.into());
+    }
+    Ok(path.components().take(2).collect())
+}
+
+#[cfg(windows)]
+fn windows_local_device(device: &str) -> bool {
+    [r"\Device\HarddiskVolume", r"\Device\CdRom", r"\Device\Ramdisk"]
+        .iter().any(|prefix| device.strip_prefix(prefix).is_some_and(|id| !id.is_empty() && id.bytes().all(|ch| ch.is_ascii_digit())))
+}
+
+/// Read reparse targets themselves, never canonicalize through an unchecked hop.
+#[cfg(windows)]
+pub fn refuse_network_hops(path: &Path) -> Result<(), String> {
+    use std::os::windows::fs::MetadataExt;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+    let absolute = if path.is_absolute() { path.to_path_buf() } else {
+        if !path.components().all(|part| matches!(part, Component::Normal(_) | Component::CurDir | Component::ParentDir)) {
+            return Err(ERR_NETWORK.into());
+        }
+        std::env::current_dir().map_err(|_| ERR_MISSING.to_string())?.join(path)
+    };
+    let mut resolved = windows_local_drive(&absolute)?;
+    let mut pending = Vec::new();
+    push_components(&absolute, &mut pending);
+    let mut hops = 0;
+    while let Some(part) = pending.pop() {
+        if part == ".." {
+            resolved.pop();
+            continue;
+        }
+        let next = resolved.join(&part);
+        match std::fs::symlink_metadata(&next) {
+            Ok(meta) if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 => {
+                hops += 1;
+                if hops > MAX_LINK_HOPS {
+                    return Err(ERR_MISSING.into());
+                }
+                let target = std::fs::read_link(&next).map_err(|_| ERR_MISSING.to_string())?;
+                if target.is_absolute() {
+                    resolved = windows_local_drive(&target)?;
+                } else if is_network_path(&target.to_string_lossy())
+                    || !target.components().all(|part| matches!(part, Component::Normal(_) | Component::CurDir | Component::ParentDir))
+                {
+                    return Err(ERR_NETWORK.into());
+                }
+                push_components(&target, &mut pending);
+            }
+            Ok(_) => resolved = next,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(ERR_MISSING.into()),
+            Err(_) => return Err(ERR_MISSING.into()),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn refuse_network_hops(path: &Path) -> Result<(), String> {
     if is_network_path(&path.to_string_lossy()) {
         Err(ERR_NETWORK.into())
@@ -431,7 +577,7 @@ pub fn refuse_network_hops(path: &Path) -> Result<(), String> {
 
 /// Pushes `path`'s components onto a stack (last first, so they pop in order);
 /// `..` stays as `..`, roots and `.` are dropped.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn push_components(path: &Path, pending: &mut Vec<std::ffi::OsString>) {
     let parts: Vec<std::ffi::OsString> = path
         .components()
@@ -716,7 +862,10 @@ pub fn load_sized(
             encode_within(&path, None, limit, max_edge)
         }
         Requested::Relative(relative) => {
-            let root = root()?.canonicalize().map_err(|_| ERR_MISSING.to_string())?;
+            let root = root()?;
+            refuse_network_hops(&root)?;
+            let root = root.canonicalize().map_err(|_| ERR_MISSING.to_string())?;
+            refuse_network_hops(&root)?;
             if !viewed(&relative_spellings(&relative, &root))? {
                 return Err(ERR_NOT_VIEWED.into());
             }

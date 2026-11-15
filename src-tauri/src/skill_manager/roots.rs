@@ -417,21 +417,26 @@ pub(super) fn codex_plugins(home: &Path, homes: &Homes) -> Vec<(PathBuf, String,
 }
 
 #[cfg(test)]
+pub(super) fn fixture_path(path: &str) -> PathBuf {
+    Path::new(if cfg!(windows) { "C:/" } else { "/" }).join(path.trim_start_matches('/'))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn skill_manager_muse_uses_its_managed_root_and_import_roots() {
         for (env, expected) in [
-            (None, PathBuf::from("/home/.config/muse/skills")),
+            (None, fixture_path("/home/.config/muse/skills")),
             (
-                Some(PathBuf::from("/config")),
-                PathBuf::from("/config/muse/skills"),
+                Some(fixture_path("/config")),
+                fixture_path("/config/muse/skills"),
             ),
         ] {
             let roots = skill_roots(
                 "muse",
-                Path::new("/home"),
-                Some(Path::new("/project")),
+                fixture_path("/home").as_path(),
+                Some(fixture_path("/project").as_path()),
                 &Homes {
                     xdg_config: env,
                     ..Homes::default()
@@ -439,10 +444,10 @@ mod tests {
             );
             for path in [
                 expected,
-                PathBuf::from("/home/.agents/skills"),
-                PathBuf::from("/home/.claude/skills"),
-                PathBuf::from("/home/.codex/skills"),
-                PathBuf::from("/project/.agents/skills"),
+                fixture_path("/home/.agents/skills"),
+                fixture_path("/home/.claude/skills"),
+                fixture_path("/home/.codex/skills"),
+                fixture_path("/project/.agents/skills"),
             ] {
                 assert!(roots.iter().any(|(p, _)| *p == path), "{path:?}");
             }
@@ -451,8 +456,8 @@ mod tests {
     #[test]
     fn skill_manager_custom_config_homes_replace_default_user_roots() {
         let homes = Homes {
-            claude: Some(PathBuf::from("/custom/CLAUDE_CONFIG_DIR")),
-            codex: Some(PathBuf::from("/custom/CODEX_HOME")),
+            claude: Some(fixture_path("/custom/CLAUDE_CONFIG_DIR")),
+            codex: Some(fixture_path("/custom/CODEX_HOME")),
             ..Homes::default()
         };
         for (harness, var, default) in [
@@ -463,15 +468,15 @@ mod tests {
         ] {
             let roots = skill_roots(
                 harness,
-                Path::new("/home"),
-                Some(Path::new("/project")),
+                fixture_path("/home").as_path(),
+                Some(fixture_path("/project").as_path()),
                 &homes,
             );
-            let expected = PathBuf::from(format!("/custom/{var}/skills"));
+            let expected = fixture_path(&format!("/custom/{var}/skills"));
             assert!(roots.iter().any(|(p, _)| *p == expected), "{harness}");
             assert!(!roots
                 .iter()
-                .any(|(p, _)| *p == Path::new("/home").join(default)));
+                .any(|(p, _)| *p == fixture_path("/home").as_path().join(default)));
         }
     }
 }
@@ -488,25 +493,25 @@ mod account_regressions {
             ("pi", "PI_CODING_AGENT_DIR"),
             ("kilo", "KILO_CONFIG_DIR"),
         ] {
-            homes.add_environment(harness, key, PathBuf::from(format!("/accounts/{harness}")));
+            homes.add_environment(harness, key, fixture_path(&format!("/accounts/{harness}")));
             homes.add_environment(harness, key, PathBuf::from("relative"));
-            homes.add_home(harness, PathBuf::from(format!("/connections/{harness}")));
-            let roots = skill_roots(harness, Path::new("/home"), None, &homes);
+            homes.add_home(harness, fixture_path(&format!("/connections/{harness}")));
+            let roots = skill_roots(harness, fixture_path("/home").as_path(), None, &homes);
             for base in ["accounts", "connections"] {
-                let expected = format!("/{base}/{harness}/skills");
+                let expected = fixture_path(&format!("/{base}/{harness}")).join("skills");
                 assert!(
-                    roots.iter().any(|(p, _)| p == Path::new(&expected)),
+                    roots.iter().any(|(p, _)| p == &expected),
                     "{roots:?}"
                 );
             }
             assert_eq!(homes.configured[harness].len(), 2);
         }
         for harness in ["opencode", "kilo"] {
-            homes.add_environment(harness, "XDG_CONFIG_HOME", PathBuf::from("/xdg"));
-            let roots = skill_roots(harness, Path::new("/home"), None, &homes);
+            homes.add_environment(harness, "XDG_CONFIG_HOME", fixture_path("/xdg"));
+            let roots = skill_roots(harness, fixture_path("/home").as_path(), None, &homes);
             for kind in ["skill", "skills"] {
-                let expected = format!("/xdg/{harness}/{kind}");
-                assert!(roots.iter().any(|(p, _)| p == Path::new(&expected)));
+                let expected = fixture_path("/xdg").join(harness).join(kind);
+                assert!(roots.iter().any(|(p, _)| p == &expected));
             }
         }
     }
@@ -514,22 +519,22 @@ mod account_regressions {
     #[test]
     fn skill_manager_pi_override_and_kilo_xdg_default_have_correct_skill_suffix() {
         let homes = Homes {
-            pi: Some("/pi-agent".into()),
-            xdg_config: Some("/xdg".into()),
+            pi: Some(fixture_path("/pi-agent")),
+            xdg_config: Some(fixture_path("/xdg")),
             ..Homes::default()
         };
-        let pi = skill_roots("pi", Path::new("/home"), None, &homes);
-        assert!(pi.iter().any(|(p, _)| *p == Path::new("/pi-agent/skills")));
+        let pi = skill_roots("pi", fixture_path("/home").as_path(), None, &homes);
+        assert!(pi.iter().any(|(p, _)| *p == fixture_path("/pi-agent/skills").as_path()));
         assert!(!pi
             .iter()
-            .any(|(p, _)| *p == Path::new("/home/.pi/agent/skills")));
-        let kilo = skill_roots("kilo", Path::new("/home"), None, &homes);
+            .any(|(p, _)| *p == fixture_path("/home/.pi/agent/skills").as_path()));
+        let kilo = skill_roots("kilo", fixture_path("/home").as_path(), None, &homes);
         assert!(kilo
             .iter()
-            .any(|(p, _)| *p == Path::new("/xdg/kilo/skills")));
+            .any(|(p, _)| *p == fixture_path("/xdg/kilo/skills").as_path()));
         assert!(kilo
             .iter()
-            .any(|(p, _)| *p == Path::new("/home/.kilo/skills")));
+            .any(|(p, _)| *p == fixture_path("/home/.kilo/skills").as_path()));
     }
 }
 
@@ -540,24 +545,24 @@ mod home_override_tests {
     fn skill_manager_grok_and_hermes_account_homes_match_cli_roots() {
         for (harness, key) in [("grok", "GROK_HOME"), ("hermes", "HERMES_HOME")] {
             let mut homes = Homes::default();
-            homes.add_environment(harness, key, "/account".into());
-            homes.add_environment(harness, key, " /account ".into());
+            homes.add_environment(harness, key, fixture_path("/account"));
+            homes.add_environment(harness, key, format!(" {} ", fixture_path("/account").display()).into());
             homes.add_environment(harness, key, "relative".into());
             let roots = skill_roots(
                 harness,
-                Path::new("/home"),
-                Some(Path::new("/project")),
+                fixture_path("/home").as_path(),
+                Some(fixture_path("/project").as_path()),
                 &homes,
             );
             assert!(
                 roots
                     .iter()
-                    .any(|(p, _)| *p == Path::new("/account/skills")),
+                    .any(|(p, _)| *p == fixture_path("/account/skills").as_path()),
                 "{roots:?}"
             );
             assert!(roots
                 .iter()
-                .any(|(p, _)| *p == Path::new(&format!("/project/.{harness}/skills"))));
+                .any(|(p, _)| *p == fixture_path(&format!("/project/.{harness}/skills")).as_path()));
             assert_eq!(homes.configured[harness].len(), 1);
         }
     }
@@ -566,19 +571,20 @@ mod home_override_tests {
 #[cfg(test)]
 mod behavior_tests {
     use crate::skill_manager::*;
+    use super::fixture_path;
     #[test]
     fn skill_manager_xdg_roots_require_absolute_paths() {
-        for (config, expected) in [("/config", "/config"), ("relative", "/home/.config")] {
+        for (config, expected) in [(fixture_path("/config"), fixture_path("/config")), (PathBuf::from("relative"), fixture_path("/home").join(".config"))] {
             let homes = Homes {
-                xdg_config: Some(config.into()),
+                xdg_config: Some(config),
                 ..Homes::default()
             };
             for harness in ["opencode", "devin", "muse"] {
-                let roots = roots::skill_roots(harness, Path::new("/home"), None, &homes);
+                let roots = roots::skill_roots(harness, fixture_path("/home").as_path(), None, &homes);
                 assert!(
                     roots
                         .iter()
-                        .any(|(p, _)| *p == Path::new(expected).join(harness).join("skills")),
+                        .any(|(p, _)| *p == expected.join(harness).join("skills")),
                     "{harness}: {roots:?}"
                 );
             }
@@ -592,28 +598,29 @@ mod environment_tests {
     #[test]
     fn skill_manager_grok_and_hermes_environment_homes_are_trimmed_and_replace_defaults() {
         for harness in ["grok", "hermes"] {
-            for value in [" /active ", "relative", "  "] {
+            let active = fixture_path("/active");
+            for value in [format!(" {} ", active.display()), "relative".into(), "  ".into()] {
                 let key = format!("{}_HOME", harness.to_uppercase());
-                let homes = Homes::from_environment(|name| (name == key).then(|| value.into()));
+                let homes = Homes::from_environment(|name| (name == key).then(|| value.clone()));
                 let roots = skill_roots(
                     harness,
-                    Path::new("/home"),
-                    Some(Path::new("/project")),
+                    fixture_path("/home").as_path(),
+                    Some(fixture_path("/project").as_path()),
                     &homes,
                 );
-                let expected = if value.trim() == "/active" {
-                    PathBuf::from("/active/skills")
+                let expected = if value.trim() == active.to_string_lossy() {
+                    fixture_path("/active/skills")
                 } else {
-                    PathBuf::from(format!("/home/.{harness}/skills"))
+                    fixture_path(&format!("/home/.{harness}/skills"))
                 };
                 assert!(roots.iter().any(|(p, _)| *p == expected), "{roots:?}");
                 assert!(roots
                     .iter()
-                    .any(|(p, _)| p == Path::new(&format!("/project/.{harness}/skills"))));
-                if value.trim() == "/active" {
+                    .any(|(p, _)| p == fixture_path(&format!("/project/.{harness}/skills")).as_path()));
+                if value.trim() == active.to_string_lossy() {
                     assert!(!roots
                         .iter()
-                        .any(|(p, _)| p == Path::new(&format!("/home/.{harness}/skills"))));
+                        .any(|(p, _)| p == fixture_path(&format!("/home/.{harness}/skills")).as_path()));
                 }
             }
         }
@@ -623,17 +630,17 @@ mod environment_tests {
         for harness in ["muse", "antigravity"] {
             let roots = skill_roots(
                 harness,
-                Path::new("/home"),
-                Some(Path::new("/project")),
+                fixture_path("/home").as_path(),
+                Some(fixture_path("/project").as_path()),
                 &Homes::default(),
             );
             assert!(roots
                 .iter()
-                .any(|(p, _)| *p == Path::new("/project/.agents/skills")));
+                .any(|(p, _)| *p == fixture_path("/project/.agents/skills").as_path()));
             if harness == "antigravity" {
                 assert!(roots
                     .iter()
-                    .any(|(p, _)| *p == Path::new("/project/_agents/skills")));
+                    .any(|(p, _)| *p == fixture_path("/project/_agents/skills").as_path()));
             }
         }
     }
