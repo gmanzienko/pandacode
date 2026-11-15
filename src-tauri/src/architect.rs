@@ -1300,7 +1300,7 @@ const FOLLOWUP_NOTE: &str = "Other workers are still active: do not edit their f
 /// A follow-up that could not start only gives its reservation back: the workers and the
 /// objective it never touched keep going.
 fn fail_followup_state(state: &AppState, admission: &Admission, notify: &mut impl FnMut(&TeamSnapshot)) {
-    let Ok(_agents) = state.agents.lock() else { return };
+    let Ok(_agents) = crate::run_requests::lock_agents(&state.agents) else { return };
     let Ok(store) = state.store.lock() else { return };
     if let Ok(Some(mut team)) = load(&store, &admission.parent) {
         if team.generation == admission.generation && team.pending_turn.as_ref().is_some_and(|p| p.reserved && p.kind.is_none()) {
