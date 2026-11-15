@@ -15,7 +15,7 @@ const KINDS: [&str; 4] = ["prompt", "slash", "check", "approval"];
 /// stream input, Codex uses `turn/steer`, Pi and omp use their own steer, Muse takes
 /// one on the wire, and OpenCode folds a second `session/prompt` into its running loop.
 const STEERING: [&str; 9] = ["claude", "glm", "mimo", "codex", "pi", "omp", "muse", "opencode", "devin"];
-const HARNESSES: [&str; 20] = [
+const HARNESSES: [&str; 21] = [
     "claude", "codex", "kimi", "glm", "opencode", "antigravity", "grok", "mimo", "alibaba", "pi", "deepseek", "commandcode", "cline", "kilo", "omp", "github-copilot", "muse", "devin", "zcode", "hermes", "qoder",
 ];
 
