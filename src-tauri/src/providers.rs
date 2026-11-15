@@ -652,8 +652,8 @@ pub struct ModelInfo {
     pub reasoning_efforts: Vec<ReasoningEffortInfo>,
     pub default_reasoning_effort: Option<String>,
     pub context_window: Option<u64>,
-    /// Codex only: every speed tier its catalog lists (key, name and description as the catalog
-    /// gives them), offered to teams as `<model>@<key>` variants and in the Speed choices.
+    /// Catalog speed tiers (key, name and description); Codex teams also offer them as
+    /// `<model>@<key>` variants. Claude fast mode remains available in the picker.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub speed_tiers: Vec<crate::command_operations::ServiceTier>,
 }

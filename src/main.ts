@@ -745,7 +745,7 @@ function promptDescription(): string {
   let enter = 'Enter to send.';
   if (running) {
     const steering = task && !teams.get(task.id) ? ` ${commandKeyName} Enter to steer the running turn.` : '';
-    enter = `Enter to queue for when the agent finishes.${steering}`;
+    enter = task && teams.get(task.id) ? 'Enter to send after the architect’s current turn. Workers keep running.' : `Enter to queue for when the agent finishes.${steering}`;
   }
   if (bot) {
     const steer = bot.whileWorking === 'steer';
