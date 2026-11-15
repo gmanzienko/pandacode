@@ -537,3 +537,26 @@ test('account switch in a live side thread stays compact and keeps its open focu
   await expect(saved.locator('p')).toBeVisible(); await expect(saved.locator('p')).toHaveText(prose);
   await expect(page.locator('#transcript .message-error, #transcript .tool-trace')).toHaveCount(0);
 });
+
+// The side composer's steer hint names the modifier this host actually uses.
+for (const [platform, modifier, spoken] of [['MacIntel', '⌘', 'Command'], ['Win32', 'Ctrl', 'Control'], ['Linux x86_64', 'Ctrl', 'Control']]) {
+  test(`the side composer names the ${platform} steer modifier`, async ({ page }) => {
+    await page.addInitScript(platform => Object.defineProperty(navigator, 'platform', { get: () => platform }), platform);
+    await page.reload();
+    await expect(prompt(page)).toBeEnabled();
+    await page.evaluate(() => { (window as any).__mainId = document.querySelector<HTMLTextAreaElement>('#prompt')!.dataset.sessionId; });
+    await prompt(page).fill('Build the feature');
+    await prompt(page).press('Enter');
+    await expect(page.getByRole('button', { name: 'Stop task', exact: true })).toBeVisible();
+    await page.evaluate(() => { (window as any).__holdSide = true; });
+    await prompt(page).fill('/btw keep working');
+    await prompt(page).press('Enter');
+    await expect(panel(page).getByRole('button', { name: 'Stop side thread', exact: true })).toBeVisible();
+    await expect(side(page)).toHaveAttribute('placeholder', `Queue a follow-up · ${modifier}↩ steers now`);
+    await expect(side(page)).toHaveAttribute('aria-description', new RegExp(`${spoken} Enter to steer its running turn`));
+    const sessionId = await sideId(page);
+    await side(page).fill('Steer on the side');
+    await side(page).press(`${platform === 'MacIntel' ? 'Meta' : 'Control'}+Enter`);
+    await expect.poll(() => calls(page, 'steer_task').then(list => list.map(call => call.args))).toEqual([{ sessionId, text: 'Steer on the side' }]);
+  });
+}

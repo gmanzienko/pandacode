@@ -346,3 +346,13 @@ test.describe('bot conversation', () => {
     await expect(page.getByRole('dialog', { name: 'Ledger settings' })).toBeVisible();
   });
 });
+
+// A working bot's composer names the modifier this host actually uses. Writer queues on Enter.
+for (const [platform, modifier, spoken] of [['MacIntel', '⌘', 'Command'], ['Win32', 'Ctrl', 'Control'], ['Linux x86_64', 'Ctrl', 'Control']]) {
+  test(`a working bot's composer names the ${platform} steer modifier`, async ({ page }) => {
+    await page.addInitScript(platform => Object.defineProperty(navigator, 'platform', { get: () => platform }), platform);
+    await openSample(page, 'Writer');
+    await expect(page.locator('#prompt')).toHaveAttribute('placeholder', `Enter queues for Writer · ${modifier}↩ steers`);
+    await expect(page.locator('#prompt')).toHaveAttribute('aria-description', new RegExp(`${spoken} Enter to steer the running turn`));
+  });
+}

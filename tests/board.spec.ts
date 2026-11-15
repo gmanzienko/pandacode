@@ -1,6 +1,9 @@
 import { expect, test, type Page } from '@playwright/test';
 // The workspace view (Conversation, Board, GitHub) is picked from the sidebar's view menu.
 const showView = async (page: Page, name: string) => { await page.getByRole('button', { name: /^Workspace view: / }).click(); await page.getByRole('menuitemradio', { name, exact: true }).click(); };
+// A menu opened before boot has selected a task never appears: showChoices drops it when the selection
+// bumps state.generation. After a navigation, wait for that selection before opening one.
+const booted = (page: Page) => page.locator('.task-item.selected').first().waitFor({ state: 'attached' });
 
 const board = (page: Page) => page.getByRole('region', { name: 'Project board', exact: true });
 const column = (page: Page, name: string) => board(page).getByRole('region', { name, exact: true });
@@ -194,6 +197,7 @@ test.describe('project board', () => {
     await page.unroute('**/src/preview.ts*');
     await installPreviewProbe(page, `Object.assign(sessions[1], { taskStage: 'completed', taskDescription: 'A completed navigation task.', completedAt: now });`);
     await page.reload();
+    await booted(page);
     await openBoard(page);
     await column(page, 'Settled').getByRole('button', { name: 'Open task: Refine the navigation', exact: true }).click();
     await showView(page, 'Conversation');
@@ -321,6 +325,7 @@ test.describe('project board', () => {
     await page.unroute('**/src/preview.ts*');
     await installPreviewProbe(page, `sessions.push({ ...sessions[1], id: 'old-archived', title: 'Archived long ago', taskStage: 'completed', completedAt: now - 604800001, archived: true, taskDescription: 'Saved task details', pinned: false, sidebarOrder: null, lastResponseAt: null });`);
     await page.reload();
+    await booted(page);
     await openBoard(page);
     await expect(board(page)).not.toContainText('archive after');
     await column(page, 'Settled').getByRole('button', { name: 'Open task: Archived long ago', exact: true }).click();
@@ -361,6 +366,7 @@ test('the sidebar view menu switches views, marks the current one and stays reac
 
 test('board cards say what needs you, in the sidebar\'s words', async ({ page }) => {
   await page.goto('/?sections');
+  await booted(page);
   await showView(page, 'Board');
   const state = (title: string) => board(page).locator('.board-card', { hasText: title }).locator('.board-state');
   await expect(state('Migrate settings storage')).toHaveText('Approval');

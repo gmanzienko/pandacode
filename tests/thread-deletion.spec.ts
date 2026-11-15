@@ -47,6 +47,8 @@ async function stored(page: Page): Promise<{ sessions: { id: string; title: stri
 }
 
 async function openDelete(page: Page): Promise<void> {
+  // Before boot selects a task, Task actions creates one instead of opening its menu.
+  await page.locator('.task-item.selected').first().waitFor({ state: 'attached' });
   await page.getByRole('button', { name: 'Task actions', exact: true }).click();
   await page.getByRole('dialog', { name: 'Task actions', exact: true }).getByRole('menuitem', { name: 'Delete task…', exact: true }).click();
   await expect(confirmation(page)).toBeVisible();

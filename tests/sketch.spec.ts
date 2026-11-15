@@ -69,9 +69,9 @@ test('draws shapes and components, edits text, and keeps history in step', async
   await expect(dialog(page)).toBeVisible();
   await expect(canvas(page)).toHaveAccessibleName('Mockup canvas, 4 shapes, text selected');
   // Undo and redo walk the same steps; Delete removes the selection.
-  await page.getByRole('button', { name: 'Undo (⌘Z)' }).click();
+  await dialog(page).locator('[data-history="undo"]').click();
   await expect(canvas(page)).toHaveAccessibleName(/3 shapes/);
-  await page.getByRole('button', { name: 'Redo (⇧⌘Z)' }).click();
+  await dialog(page).locator('[data-history="redo"]').click();
   await expect(canvas(page)).toHaveAccessibleName('Mockup canvas, 4 shapes');
   // Clicking the caption selects it again; Backspace removes it.
   await page.mouse.click(box.x + box.width * 0.6 + 12, box.y + box.height * 0.8 + 6);
@@ -135,3 +135,26 @@ test('a canceled sketch keeps its draft for the task and the canvas preset moves
   await page.keyboard.press('Escape');
   await expect(dialog(page)).toBeHidden();
 });
+
+// The history toolbar names the modifier this host actually uses, and that modifier is the one that works.
+for (const [platform, modifier, shift, key] of [['MacIntel', '⌘', '⇧', 'Meta'], ['Win32', 'Ctrl', 'Shift', 'Control'], ['Linux x86_64', 'Ctrl', 'Shift', 'Control']]) {
+  test(`the history toolbar names the ${platform} modifier`, async ({ page }) => {
+    await page.addInitScript(platform => Object.defineProperty(navigator, 'platform', { get: () => platform }), platform);
+    await probe(page);
+    await openSketch(page);
+    const history = dialog(page).getByRole('group', { name: 'History' });
+    for (const [selector, name, title] of [
+      ['[data-history="undo"]', `Undo (${modifier} Z)`, `Undo · ${modifier} Z`],
+      ['[data-history="redo"]', `Redo (${modifier} ${shift} Z)`, `Redo · ${modifier} ${shift} Z`],
+      ['[data-edit="duplicate"]', `Duplicate (${modifier} D)`, `Duplicate · ${modifier} D`],
+    ]) {
+      await expect(history.locator(selector)).toHaveAccessibleName(name);
+      await expect(history.locator(selector)).toHaveAttribute('title', title);
+    }
+    await drag(page, [0.1, 0.1], [0.4, 0.4]);
+    await expect(canvas(page)).toHaveAccessibleName(/1 shape/);
+    await canvas(page).focus();
+    await page.keyboard.press(`${key}+z`);
+    await expect(canvas(page)).not.toHaveAccessibleName(/1 shape/);
+  });
+}

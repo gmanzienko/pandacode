@@ -23,8 +23,9 @@ test.beforeEach(async ({ page }) => {
     await route.fulfill({ response, body: body + '\nwindow.__queueEmit = emit; window.__queueSession = session; window.__queueInvoke = invoke;\n' });
   });
   await page.addInitScript(() => { (window as any).__holdAgent = true; });
-  await page.goto('/');
-  await expect(prompt(page)).toBeEnabled();
+  // A cold Vite transform under a loaded parallel run can outlast the default boot wait.
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await expect(prompt(page)).toBeEnabled({ timeout: 20_000 });
 });
 
 async function startRun(page: Page): Promise<void> {
@@ -107,6 +108,8 @@ test('deleting from a held queue asks first', async ({ page }) => {
   await page.evaluate(() => (window as any).__queueEmit('agent-event', { sessionId: 'session-1', kind: 'error', text: 'boom' }));
   await page.evaluate(() => { (window as any).__queueSession('session-1').status = 'idle'; (window as any).__queueEmit('agent-event', { sessionId: 'session-1', kind: 'done', text: '' }); });
   await expect(panel(page)).toContainText('Paused');
+  // The handoff redraws the composer when the saved reply lands, taking the confirm with it. The steer bar holds its space until then.
+  await expect(page.locator('.composer-steer-bar[data-holding]')).toHaveCount(0);
   await panel(page).getByRole('button', { name: 'Remove queued message 1' }).click();
   await expect(panel(page).getByText('Delete queued message?')).toBeVisible();
   await panel(page).getByRole('button', { name: 'Keep' }).click();

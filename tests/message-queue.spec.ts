@@ -41,7 +41,7 @@ async function startRun(page: Page): Promise<void> {
 
 test('queues messages during a run, edits and reorders them, and steers mid-turn', async ({ page }) => {
   await startRun(page);
-  await expect(prompt(page)).toHaveAttribute('placeholder', /Queue a follow-up · ⌘↩ steers now/);
+  await expect(prompt(page)).toHaveAttribute('placeholder', /Queue a follow-up · (⌘|Ctrl)↩ steers now/);
   await prompt(page).fill('First follow-up');
   await prompt(page).press('Enter');
   await prompt(page).fill('Second follow-up');
@@ -247,5 +247,17 @@ for (const [name, ime] of [['keyCode 229', { keyCode: 229 }], ['isComposing', { 
     await expect(find.locator('.thread-find-count')).toHaveText('1 of 2');
     await input.press('Enter');
     await expect(find.locator('.thread-find-count')).toHaveText('2 of 2');
+  });
+}
+
+// The steer hint names the modifier this host actually uses, on screen and for a screen reader.
+for (const [platform, modifier, spoken] of [['MacIntel', '⌘', 'Command'], ['Win32', 'Ctrl', 'Control'], ['Linux x86_64', 'Ctrl', 'Control']]) {
+  test(`the running composer names the ${platform} steer modifier`, async ({ page }) => {
+    await page.addInitScript(platform => Object.defineProperty(navigator, 'platform', { get: () => platform }), platform);
+    await page.reload();
+    await expect(prompt(page)).toBeEnabled();
+    await startRun(page);
+    await expect(prompt(page)).toHaveAttribute('placeholder', `Queue a follow-up · ${modifier}↩ steers now`);
+    await expect(prompt(page)).toHaveAttribute('aria-description', new RegExp(`${spoken} Enter to steer the running turn`));
   });
 }

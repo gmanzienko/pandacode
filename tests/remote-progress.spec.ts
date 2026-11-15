@@ -6,8 +6,11 @@ import { expect, test, type Page } from '@playwright/test';
 async function newTask(page: Page) {
   await page.goto('/');
   await page.locator('#navigation .task-item').first().waitFor();
-  await page.locator('.new-task-button').click();
   await page.getByRole('textbox', { name: 'Message your coding agent' }).waitFor();
+  const leaving = await page.locator('#prompt').getAttribute('data-session-id');
+  await page.locator('.new-task-button').click();
+  // The old prompt stays on screen until create_session lands, so waiting for a textbox is not waiting for the new task.
+  await expect(page.locator('#prompt')).not.toHaveAttribute('data-session-id', leaving!);
 }
 
 /** Starts tracking a start for the open New task, stepped by `__remoteStartNext()`. */
@@ -104,7 +107,9 @@ async function sendToStudio(page: Page, text: string) {
   await panel.getByRole('button', { name: 'Sign in with GitHub' }).click();
   await expect(panel.getByRole('button', { name: 'Sign out' })).toBeVisible();
   await page.getByRole('button', { name: /^back/i }).click();
+  const leaving = await page.locator('#prompt').getAttribute('data-session-id');
   await page.locator('.new-task-button').click();
+  await expect(page.locator('#prompt')).not.toHaveAttribute('data-session-id', leaving!);
   await page.locator('#composer-computer').click();
   await page.getByRole('menuitemradio', { name: 'Studio iMac' }).click();
   await page.getByRole('textbox', { name: 'Message your coding agent' }).fill(text);

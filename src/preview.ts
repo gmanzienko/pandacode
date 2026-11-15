@@ -3,7 +3,7 @@ import { VOICE_CANCELLED } from './voice-types';
 import realVoiceCatalog from '../src-tauri/src/voice/local/catalog.json';
 import { previewHub, previewRepos } from './preview-github-hub';
 import type { AgentEvent, BrowserStatus, FileEntry, GitStatus, Message, MessagePage, Project, Provider, ProviderId, ProviderModel, Session, TaskStage, ToolActivity } from './types';
-import { fallbackModel } from './model-catalog';
+import { fallbackModel, parseContextUsage } from './model-catalog';
 import { historicalProvider } from './provider-handoff';
 import { isPreviewableFile } from './file-links';
 import { DISMISS_BATCH } from './thread-errors';
@@ -651,7 +651,14 @@ export function listen(name: string, callback: (event: any) => void): () => void
 export function samplePick(kind: 'files' | 'folder'): string[] {
   return kind === 'folder' ? ['/Users/you/Projects/orbit-design'] : ['/Users/you/Pictures/dashboard-mockup.png', '/Users/you/Documents/Product brief.pdf'];
 }
-function agent(event: AgentEvent) { emit('agent-event', event); }
+function agent(event: AgentEvent) {
+  // `record_context_usage` in lib.rs keeps a report past its turn, so a listing still carries it.
+  if (event.kind === 'usage') {
+    const usage = parseContextUsage(event.data), reported = sessions.find(task => task.id === event.sessionId);
+    if (reported && usage) reported.contextUsage = usage;
+  }
+  emit('agent-event', event);
+}
 /** `MESSAGE_LIMIT` in lib.rs. */
 const MESSAGE_LIMIT = 16 * 1024 * 1024;
 /** tests: a live `error` event for any task, saved first like lib.rs `save_agent_activity` does: the row goes into the

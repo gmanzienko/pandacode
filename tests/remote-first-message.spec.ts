@@ -7,7 +7,9 @@ import { expect, test, type Page } from '@playwright/test';
 async function sendToStudio(page: Page, text: string) {
   test.slow();
   await page.addInitScript(() => { (window as any).__remoteStartManual = true; });
-  await page.goto('/');
+  // ?slowturn streams at a real agent's pace. At the preview's own 24 ms pace the reply is over in
+  // under a second, which is shorter than the gap between two polls of an expect that has backed off.
+  await page.goto('/?slowturn');
   await page.locator('#navigation .task-item').first().waitFor();
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('tab', { name: 'Connections', exact: true }).click(); await page.getByRole('tab', { name: 'Remote access' }).click();
@@ -15,7 +17,10 @@ async function sendToStudio(page: Page, text: string) {
   await panel.getByRole('button', { name: 'Sign in with GitHub' }).click();
   await expect(panel.getByRole('button', { name: 'Sign out' })).toBeVisible();
   await page.getByRole('button', { name: /^back/i }).click();
+  const leaving = await page.locator('#prompt').getAttribute('data-session-id');
   await page.locator('.new-task-button').click();
+  // The old prompt stays on screen until create_session lands; choosing a computer before then would act on the task it leaves.
+  await expect(page.locator('#prompt')).not.toHaveAttribute('data-session-id', leaving!);
   await page.locator('#composer-computer').click();
   await page.getByRole('menuitemradio', { name: 'Studio iMac' }).click();
   await page.getByRole('textbox', { name: 'Message your coding agent' }).fill(text);

@@ -406,6 +406,8 @@ test('machine orchestration: a thread whose computer is offline reads Offline an
 });
 
 test('machine orchestration: one thread changing status touches only its own row', async ({ page }) => {
+  // The brand mark redraws every frame; reduced motion stops it, leaving only the status change to count.
+  await page.emulateMedia({ reducedMotion: 'reduce' });
   await withOrchestration(page);
   const parent = await openTask(page, 'Make search feel instant');
   const ids = await page.evaluate(([id, machine]) => Array.from({ length: 40 }, (_, index) => (window as any).__machineChild(id, { title: `Thread ${index}`, machine, launch: true }) as string), [parent, mini] as const);

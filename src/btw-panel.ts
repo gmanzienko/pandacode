@@ -3,6 +3,7 @@
 // supplied by main.ts through the host, so both read and behave alike.
 import { escape, icon, isImeKey } from './dom';
 import { TITLE_PREFIX, parseBtw } from './btw';
+import { commandKey, commandKeyName } from './platform';
 import type { Message, MessagePage, Session } from './types';
 
 export interface BtwPanelHost {
@@ -255,10 +256,10 @@ export class BtwPanel {
     }
     const input = root.querySelector<HTMLTextAreaElement>('.btw-input')!;
     const running = side ? this.host.running(side.id) : false;
-    const placeholder = running ? 'Queue a follow-up · ⌘↩ steers now' : 'Ask on the side…';
+    const placeholder = running ? `Queue a follow-up · ${commandKey}↩ steers now` : 'Ask on the side…';
     if (input.placeholder !== placeholder) {
       input.placeholder = placeholder;
-      input.setAttribute('aria-description', running ? 'Enter to queue for when the side agent finishes. Command Enter to steer its running turn.' : 'Enter to send. Shift Enter for a new line. Type / for commands or @ to mention a project file.');
+      input.setAttribute('aria-description', running ? `Enter to queue for when the side agent finishes. ${commandKeyName} Enter to steer its running turn.` : 'Enter to send. Shift Enter for a new line. Type / for commands or @ to mention a project file.');
     }
   }
 }

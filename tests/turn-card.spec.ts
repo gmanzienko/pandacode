@@ -272,25 +272,26 @@ test('the live card hands off to the saved card in one frame, eases once at the 
   const errors = await open(page);
   // Sampled every frame from the send until well after the saved card took over.
   await page.evaluate(() => {
-    const frames: { cards: number; live: number; liveHeight: number | null; lastHeight: number | null; text: boolean; done: boolean; folded: boolean; bubble: number | null; height: number }[] = [];
+    const frames: { cards: number; live: number; liveHeight: number | null; lastHeight: number | null; text: boolean; done: boolean; folded: boolean; bubble: number | null; height: number; t: number }[] = [];
     (window as unknown as { __frames: typeof frames }).__frames = frames;
-    const loop = () => {
+    const loop = (now: number) => {
       const shown = [...document.querySelectorAll<HTMLElement>('#transcript .turn-card')].filter(card => card.getClientRects().length);
       const live = document.querySelector<HTMLElement>('#stream-region .turn-card.is-live');
       const bubble = [...document.querySelectorAll<HTMLElement>('#transcript .user-message')].at(-1);
       frames.push({ cards: shown.length, live: shown.filter(card => card.classList.contains('is-live')).length, liveHeight: live?.getClientRects().length ? live.getBoundingClientRect().height : null, lastHeight: shown.at(-1)?.getBoundingClientRect().height ?? null,
-        text: Boolean(live?.querySelector('.live-message:not([hidden])')), done: Boolean(live?.hasAttribute('data-done')), folded: Boolean(live?.querySelector('.turn-activity[data-folded]')), bubble: bubble ? bubble.getBoundingClientRect().top : null, height: document.querySelector('#transcript')!.scrollHeight });
+        text: Boolean(live?.querySelector('.live-message:not([hidden])')), done: Boolean(live?.hasAttribute('data-done')), folded: Boolean(live?.querySelector('.turn-activity[data-folded]')), bubble: bubble ? bubble.getBoundingClientRect().top : null, height: document.querySelector('#transcript')!.scrollHeight, t: now });
       // Read after the frame has painted: an animation frame runs before the transcript's observer settles the scroll, so it would see a position nobody does.
-      if (frames.length < 900) requestAnimationFrame(() => { const channel = new MessageChannel(); channel.port1.onmessage = loop; channel.port2.postMessage(0); });
+      // The frame's own timestamp is the clock the layout belongs to; performance.now() here would time the post-paint task instead.
+      if (frames.length < 900) requestAnimationFrame(at => { const channel = new MessageChannel(); channel.port1.onmessage = () => loop(at); channel.port2.postMessage(0); });
     };
-    loop();
+    loop(performance.now());
   });
   await page.locator('#prompt').fill('Explain the preview');
   await page.locator('#prompt').press('Enter');
   await expect(page.locator('#stream-region .turn-card')).toHaveCount(0, { timeout: 10000 });
   await expect(cards(page)).toHaveCount(3);
   await page.waitForTimeout(1200);
-  const frames = await page.evaluate(() => (window as unknown as { __frames: { cards: number; live: number; liveHeight: number | null; lastHeight: number | null; text: boolean; done: boolean; folded: boolean; bubble: number | null; height: number }[] }).__frames);
+  const frames = await page.evaluate(() => (window as unknown as { __frames: { cards: number; live: number; liveHeight: number | null; lastHeight: number | null; text: boolean; done: boolean; folded: boolean; bubble: number | null; height: number; t: number }[] }).__frames);
   const liveFrames = frames.map((frame, index) => ({ ...frame, index })).filter(frame => frame.live);
   expect(liveFrames.length).toBeGreaterThan(5);
   // Never two cards for one turn: two saved turns plus either the live card or the new saved one.
@@ -301,18 +302,24 @@ test('the live card hands off to the saved card in one frame, eases once at the 
   // From the first token on, the prompt above the card moves only with the follow (the reply growing; a result card
   // unfolding is followed at most FOLLOW_MAX_LAG behind), never down while the trace folds (blank room takes its
   // height), and not at all from the handoff on: the live card is at its saved shape and nothing moves by itself.
+  // The motion budgets are per unit time, written as the pixels one 60 Hz frame may cover: a host that paints at
+  // 30 Hz covers twice the pixels between two samples, and the ease is no less gentle for it.
+  const frameMs = 1000 / 60;
   const from = liveFrames.find(frame => frame.text)!.index, swap = liveFrames.at(-1)!.index + 1;
   for (let i = from + 1; i < frames.length; i++) {
-    const step = frames[i].bubble! - frames[i - 1].bubble!;
-    expect(Math.abs(step), `prompt moved ${step}px at frame ${i}`).toBeLessThanOrEqual(i >= swap ? 1 : 40);
-    if (i < swap) expect(step, `prompt slid down ${step}px at frame ${i}`).toBeLessThanOrEqual(1);
+    const step = frames[i].bubble! - frames[i - 1].bubble!, elapsed = frames[i].t - frames[i - 1].t;
+    if (i >= swap) expect(Math.abs(step), `prompt moved ${step}px at frame ${i}`).toBeLessThanOrEqual(1);
+    else {
+      expect(Math.abs(step) / elapsed, `prompt moved ${step}px in ${elapsed}ms at frame ${i}`).toBeLessThanOrEqual(40 / frameMs);
+      expect(step, `prompt slid down ${step}px at frame ${i}`).toBeLessThanOrEqual(1);
+    }
   }
-  expect(frames.length - swap, 'sampled a second after the run').toBeGreaterThan(40);
+  expect(frames[frames.length - 1].t - frames[swap].t, 'sampled a second after the run').toBeGreaterThan(40 * frameMs);
   // The handoff is one ease (the footer): one direction, gently.
-  const after = frames.slice(swap - 1).map(frame => frame.lastHeight!), direction = Math.sign(after.at(-1)! - after[0]);
+  const after = frames.slice(swap - 1), direction = Math.sign(after.at(-1)!.lastHeight! - after[0].lastHeight!);
   for (let i = 1; i < after.length; i++) {
-    const step = after[i] - after[i - 1];
-    expect(Math.abs(step), `the saved card moved ${step}px in a frame`).toBeLessThanOrEqual(16);
+    const step = after[i].lastHeight! - after[i - 1].lastHeight!, elapsed = after[i].t - after[i - 1].t;
+    expect(Math.abs(step) / elapsed, `the saved card moved ${step}px in ${elapsed}ms`).toBeLessThanOrEqual(16 / frameMs);
     expect(step * direction, `the saved card reversed at frame ${swap - 1 + i}`).toBeGreaterThanOrEqual(-0.5);
   }
   // Each redraw is one layout: a saved reply is clamped in the task it is drawn, so no frame sees it at full height (a spike).
@@ -356,8 +363,17 @@ test('a send eases the thread to the new turn', async ({ page }) => {
   const tops = () => page.evaluate(() => {
     const frames: [number, number][] = [];
     (window as unknown as { __tops: [number, number][] }).__tops = frames;
-    // Queried each frame: the send redraws the transcript.
-    const loop = (now: number) => { frames.push([now, document.querySelector<HTMLElement>('#transcript .turn-card')!.getBoundingClientRect().top]); if (frames.length < 24) requestAnimationFrame(loop); };
+    // Queried each frame: the send redraws the transcript. Read after the frame has painted, on the frame's
+    // own timestamp: an animation frame runs before the transcript's observer settles the scroll, so a
+    // pre-paint read sees a position nobody does and counts it as a leap.
+    const loop = (now: number) => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => {
+        frames.push([now, document.querySelector<HTMLElement>('#transcript .turn-card')!.getBoundingClientRect().top]);
+        if (frames.length < 24) requestAnimationFrame(loop);
+      };
+      channel.port2.postMessage(0);
+    };
     requestAnimationFrame(loop);
   });
   // In px per 60 Hz frame, so a slow frame under load is not read as a leap.
