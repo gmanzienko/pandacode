@@ -19,7 +19,7 @@ type ModelPickerOptions = {
   /** A speed tier from the model's `speedTiers`; null is the standard speed. */
   onSpeedSelect?: (tier: string | null) => Promise<void>;
   loadModels?: (provider: ProviderId) => Promise<ProviderModel[]>;
-  /** Another computer's harnesses: the picker opens with a loading row, then lists them, or one disabled row with the error. */
+  /** Another computer's harnesses: the picker opens with a loading row, then lists them, or a readable failure card. */
   loadProviders?: () => Promise<Provider[]>;
   /** Model IDs to list first in a shortened catalog, newest first; null lists every model. Search always covers all. */
   recent?: (provider: ProviderId) => string[] | null;
@@ -46,6 +46,43 @@ const optionKey = (button: HTMLElement) => `${button.dataset.provider}:${button.
 const includes = (values: string[], query: string) => values.some(value => value.toLowerCase().includes(query));
 let pickerCount = 0;
 
+const SUMMARY_LIMIT = 180;
+const graphemeSegmenter = typeof Intl !== 'undefined' && 'Segmenter' in Intl ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+/** A discovery failure's first line, short enough for a tooltip that never clips; the full text shows in the list.
+ *  `hint` adds the pointer to the list, for the rail tab that opens it. */
+function failureSummary(failure: string, hint = false): string {
+  if (!failure) return '';
+  const lines = failure.split('\n').map(line => line.trim()).filter(Boolean);
+  const first = lines[0] ?? '';
+  const chars = graphemeSegmenter ? Array.from(graphemeSegmenter.segment(first), ({ segment }) => segment) : [...first];
+  const capped = chars.length > SUMMARY_LIMIT;
+  let summary = first;
+  if (capped) {
+    const headChars = chars.slice(0, SUMMARY_LIMIT - 1);
+    const space = headChars.lastIndexOf(' ');
+    const head = (space >= Math.floor(SUMMARY_LIMIT * 0.6) ? headChars.slice(0, space) : headChars).join('');
+    summary = `${head.replace(/[\s,;:\-—]+$/, '')}…`;
+  }
+  if (!hint || (lines.length <= 1 && !capped)) return summary;
+  const lead = /[.!?…]$/.test(summary) ? summary : `${summary.replace(/[\s,;:\-—]+$/, '')}.`;
+  return `${lead} Select to view details.`;
+}
+
+/** Keyboard scrolling for a text box that holds focus but no rows. True when the key scrolled. */
+function scrollBox(box: HTMLElement, key: string, shift: boolean): boolean {
+  const page = box.clientHeight * 0.8;
+  switch (key) {
+    case 'ArrowDown': box.scrollTop += 48; return true;
+    case 'ArrowUp': box.scrollTop -= 48; return true;
+    case 'PageDown': box.scrollTop += page; return true;
+    case 'PageUp': box.scrollTop -= page; return true;
+    case 'Home': box.scrollTop = 0; return true;
+    case 'End': box.scrollTop = box.scrollHeight; return true;
+    case ' ': box.scrollTop += shift ? -page : page; return true;
+    default: return false;
+  }
+}
+
 /** A harness's catalog and availability. */
 type Group = { key: string; provider: Provider; name: string; locked: boolean; unavailable: boolean; failure: string };
 type Row = { group: Group; model: ProviderModel; custom?: boolean };
@@ -66,10 +103,13 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
   panel.className = 'model-menu floating-menu';
   panel.setAttribute('role', 'dialog');
   panel.setAttribute('aria-label', 'Harness and model');
-  panel.innerHTML = `<div class="model-menu-search">${icon('search')}<input type="search" role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls="${uid}-list" aria-label="Search harnesses and models" autocomplete="off" spellcheck="false" maxlength="200"></div><div class="model-menu-body"><div class="model-menu-rail" role="tablist" aria-orientation="vertical" aria-label="Harnesses"></div><div class="model-menu-list" id="${uid}-list" role="listbox" aria-label="Models"></div></div><p class="model-menu-error" role="alert" hidden></p><div class="model-menu-settings" hidden></div><p class="model-menu-pending" role="status" hidden>Applying…</p>`;
+  panel.innerHTML = `<div class="model-menu-search">${icon('search')}<input type="search" role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls="${uid}-list" aria-label="Search harnesses and models" autocomplete="off" spellcheck="false" maxlength="200"></div><div class="model-menu-body"><div class="model-menu-rail" role="tablist" aria-orientation="vertical" aria-label="Harnesses"></div><div class="model-menu-list"><div class="model-menu-options" id="${uid}-list" role="listbox" aria-label="Models"></div><p class="model-menu-failure" role="alert" aria-live="polite" tabindex="-1" hidden></p></div></div><p class="model-menu-error" role="alert" tabindex="-1" hidden></p><div class="model-menu-settings" hidden></div><p class="model-menu-pending" role="status" hidden>Applying…</p>`;
   const search = panel.querySelector<HTMLInputElement>('input')!;
   const rail = panel.querySelector<HTMLElement>('.model-menu-rail')!;
-  const list = panel.querySelector<HTMLElement>('.model-menu-list')!;
+  // The inset card scrolls; the listbox inside it holds only rows, and a failure's alert sits beside it.
+  const listContainer = panel.querySelector<HTMLElement>('.model-menu-list')!;
+  const list = panel.querySelector<HTMLElement>('.model-menu-options')!;
+  const failureBox = panel.querySelector<HTMLElement>('.model-menu-failure')!;
   const settings = panel.querySelector<HTMLElement>('.model-menu-settings')!;
   const error = panel.querySelector<HTMLElement>('.model-menu-error')!;
   const pendingStatus = panel.querySelector<HTMLElement>('.model-menu-pending')!;
@@ -78,6 +118,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
   const originalExpanded = anchor.getAttribute('aria-expanded');
   let pending = false;
   let providersStatus = options.loadProviders ? 'Loading…' : '';
+  let providersError = '';
   let closed = false;
   let activeKey = '';
   let positionFrame = 0;
@@ -93,6 +134,26 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
     if (!target && anchorId) target = document.getElementById(anchorId);
     if (!target && anchorAction) target = document.querySelector<HTMLElement>(`[data-action="${CSS.escape(anchorAction)}"]`);
     target?.focus({ preventScroll: true });
+  }
+
+  /** A shown error is a Tab stop, so a long one can be scrolled and copied from the keyboard. */
+  function showError(message: string | null): void {
+    const text = message?.trim() ?? '';
+    const hide = !text;
+    if (hide && error.contains(document.activeElement)) search.focus({ preventScroll: true });
+    if (!hide) { error.textContent = text; error.scrollTop = 0; }
+    error.hidden = hide;
+    error.tabIndex = hide ? -1 : 0;
+  }
+
+  /** The viewed harness's discovery failure, whole; text is replaced only when it changes, so a selection survives redraws. */
+  function showFailure(failure: string): void {
+    const text = failure.trim();
+    // A new failure starts at its headline, not where the last harness's card was scrolled.
+    if (text && failureBox.textContent !== text) { failureBox.textContent = text; listContainer.scrollTop = 0; }
+    if (!text && failureBox.contains(document.activeElement)) search.focus({ preventScroll: true });
+    failureBox.hidden = !text;
+    failureBox.tabIndex = text ? 0 : -1;
   }
 
   function close(shouldRestoreFocus = true): void {
@@ -149,7 +210,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
   function groups(): Group[] {
     return providers.filter(provider => provider.installed || provider.id === current.provider).map(provider => {
       // A harness whose catalog failed is disabled; hovering it shows why.
-      const failure = catalogErrors.has(provider.id) ? catalogErrors.get(provider.id) || 'Could not load models.' : '';
+      const failure = catalogErrors.has(provider.id) ? catalogErrors.get(provider.id)?.trim() || 'Could not load models.' : '';
       return {
         key: `h:${provider.id}`, provider, name: provider.name,
         locked: !canSwitchProvider && provider.id !== current.provider, unavailable: !provider.installed || Boolean(failure), failure,
@@ -214,7 +275,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
     const title = [model.contextWindow ? `${context} context` : '', model.description || (model.name !== model.id && model.id !== 'default' ? model.id : '')].filter(Boolean).join(' · ');
     const meta = mixed ? group.name : context;
     const name = custom ? `Use “${escape(query)}”` : escape(model.name);
-    return `<button type="button" role="option" tabindex="-1" class="model-menu-option${selected ? ' model-menu-current' : ''}${custom ? ' model-menu-custom' : ''}" data-provider="${group.provider.id}" data-model="${escape(model.id)}" data-available="${!disabled}" aria-label="${escape(accessible)}" title="${escape(custom ? accessible : group.failure || title)}" ${selected ? 'aria-current="true"' : ''} ${disabled ? 'aria-disabled="true" disabled' : ''}>${mixed ? providerLogo(group.provider.id) : ''}<span class="model-menu-name" title="${custom ? escape(query) : escape(model.name)}">${name}</span>${meta ? `<span class="model-menu-meta">${escape(meta)}</span>` : ''}${selected ? icon('check', 'model-menu-check') : custom ? icon('plus', 'model-menu-check') : ''}</button>`;
+    return `<button type="button" role="option" tabindex="-1" class="model-menu-option${selected ? ' model-menu-current' : ''}${custom ? ' model-menu-custom' : ''}" data-provider="${escape(group.provider.id)}" data-model="${escape(model.id)}" data-available="${!disabled}" aria-label="${escape(accessible)}" title="${escape(custom ? accessible : failureSummary(group.failure) || title)}" ${selected ? 'aria-current="true"' : ''} ${disabled ? 'aria-disabled="true" disabled' : ''}>${mixed ? providerLogo(group.provider.id) : ''}<span class="model-menu-name" title="${custom ? escape(query) : escape(model.name)}">${name}</span>${meta ? `<span class="model-menu-meta">${escape(meta)}</span>` : ''}${selected ? icon('check', 'model-menu-check') : custom ? icon('plus', 'model-menu-check') : ''}</button>`;
   }
 
   function heading(logo: string, name: string, status = ''): string {
@@ -222,7 +283,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
   }
 
   function railItem(key: string, logo: string, name: string, count: string, classes: string, selected: boolean, label = name, tip = ''): string {
-    return `<button type="button" role="tab" class="model-menu-tab${classes}" data-view="${escape(key)}" aria-selected="${selected}" aria-controls="${uid}-list" aria-label="${escape(label)}" ${tip ? `data-tip="${escape(tip)}"` : `title="${escape(name)}"`} tabindex="${key === view ? 0 : -1}">${logo}<span class="model-menu-tab-label">${escape(name)}</span><span class="model-menu-count">${escape(count)}</span></button>`;
+    return `<button type="button" role="tab" class="model-menu-tab${classes}" data-view="${escape(key)}" aria-selected="${selected}" aria-controls="${uid}-list" aria-label="${escape(label)}" ${tip ? `data-tip="${escape(tip)}" aria-description="${escape(tip)}"` : `title="${escape(name)}"`} tabindex="${key === view ? 0 : -1}">${logo}<span class="model-menu-tab-label">${escape(name)}</span><span class="model-menu-count">${escape(count)}</span></button>`;
   }
 
   function renderChoices(): void {
@@ -251,17 +312,28 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
     railHtml += all.map(group => {
       const count = query ? hits.get(group.key)!.length : 0;
       const classes = `${inUse(group.key) ? ' has-current' : ''}${group.locked || group.unavailable || (query && !count) ? ' is-dim' : ''}`;
-      return railItem(group.key, providerLogo(group.provider.id), group.name, count ? String(count) : '', classes, !query && view === group.key, group.name, group.failure);
+      return railItem(group.key, providerLogo(group.provider.id), group.name, count ? String(count) : '', classes, !query && view === group.key, group.name, failureSummary(group.failure, true));
     }).join('');
     if (railHtml !== railMarkup) {
+      const railFocused = rail.contains(document.activeElement);
+      const focusedView = railFocused
+        ? (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('[role="tab"]')?.dataset.view
+        : undefined;
       rail.innerHTML = railHtml;
       railMarkup = railHtml;
+      if (railFocused) {
+        const nextTab = (focusedView ? rail.querySelector<HTMLElement>('[role="tab"][data-view="' + CSS.escape(focusedView) + '"]') : null)
+          ?? rail.querySelector<HTMLElement>('[role="tab"][data-view="' + CSS.escape(view) + '"]')
+          ?? rail.querySelector<HTMLElement>('[role="tab"]');
+        (nextTab ?? search).focus({ preventScroll: true });
+      }
       if (query) rail.querySelector('.model-menu-count:not(:empty)')?.parentElement?.scrollIntoView({ block: 'nearest' });
     }
 
     // List: the viewed harness, Recent, Teams, or flat search results.
     let markup = '';
     let total = 0;
+    let failure = '';
     if (query) {
       total += matchedTeams.length;
       markup += matchedTeams.map(teamRow).join('');
@@ -284,16 +356,20 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
       const group = all.find(group => group.key === view);
       if (group) {
         const visible = shortList(group.provider.id, models(group));
-        total = visible.length;
-        const status = group.locked ? '<span>New task required</span>' : group.failure ? `<span data-tip="${escape(group.failure)}">Unavailable</span>` : group.unavailable ? '<span>Unavailable</span>' : `<span data-catalog-loading="${group.provider.id}" hidden>Loading…</span>`;
+        total = visible.length + (group.failure ? 1 : 0);
+        const status = group.locked ? '<span>New task required</span>' : group.unavailable ? '<span>Unavailable</span>' : `<span data-catalog-loading="${escape(group.provider.id)}" hidden>Loading…</span>`;
+        // The whole failure (with its Details tail) stays in the list card: scrollable, selectable, no hover needed.
+        failure = group.failure;
         markup = heading(providerLogo(group.provider.id), group.name, status) + visible.map(model => modelRow({ group, model }, false, '')).join('');
       }
     }
-    if (providersStatus) markup = `<button type="button" role="option" tabindex="-1" class="model-menu-option" data-available="false" disabled>${icon('monitor')}<span class="model-menu-name">${escape(providersStatus)}</span></button>`;
+    if (providersError) { markup = heading(icon('monitor'), 'Harnesses', '<span>Unavailable</span>'); failure = providersError; }
+    else if (providersStatus) { markup = `<button type="button" role="option" tabindex="-1" class="model-menu-option" data-available="false" disabled>${icon('monitor')}<span class="model-menu-name">${escape(providersStatus)}</span></button>`; failure = ''; }
     else if (!total) markup = '<p class="model-menu-empty">No matching models.</p>';
     // Loading and saving are in-place updates: retain rows and scroll position.
     const changed = markup !== listMarkup;
     if (changed) { list.innerHTML = markup; listMarkup = markup; }
+    showFailure(failure);
     // Typing clears the active row even when the list is unchanged; pick one again.
     if (changed || !enabledButtons().some(button => optionKey(button) === activeKey)) {
       const buttons = enabledButtons();
@@ -338,6 +414,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
     view = key;
     activeKey = '';
     if (search.value) search.value = '';
+    listContainer.scrollTop = 0;
     renderChoices();
     if (focusTab) rail.querySelector<HTMLElement>(`[data-view="${CSS.escape(key)}"]`)?.focus({ preventScroll: true });
     rail.querySelector(`[data-view="${CSS.escape(key)}"]`)?.scrollIntoView({ block: 'nearest' });
@@ -428,8 +505,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
     const supported = (kind === 'effort' ? model?.reasoningEfforts : model?.speedTiers) ?? [];
     if (id !== null && !supported.some(choice => choice.id === id)) {
       if (id === saved(kind)) return;
-      error.textContent = kind === 'effort' ? 'This reasoning effort is no longer available. Choose another level.' : 'This speed is no longer available. Choose another speed.';
-      error.hidden = false;
+      showError(kind === 'effort' ? 'This reasoning effort is no longer available. Choose another level.' : 'This speed is no longer available. Choose another speed.');
       renderSettings();
       return;
     }
@@ -437,15 +513,15 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
     const focused = settings.contains(document.activeElement);
     pending = true;
     pendingChoice = { kind, id };
-    error.hidden = true;
+    showError(null);
     updateControls();
     try {
       await callback(id);
       if (kind === 'effort') current.reasoningEffort = id; else current.serviceTier = id;
     } catch (reason) {
       if (closed) return;
-      error.textContent = reason instanceof Error ? reason.message : String(reason);
-      error.hidden = false;
+      const detail = (reason instanceof Error ? reason.message : String(reason ?? '')).trim();
+      showError(detail || (kind === 'effort' ? 'Could not save reasoning effort.' : 'Could not save speed.'));
     } finally {
       if (!closed) {
         pending = false;
@@ -468,7 +544,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
   async function select(button: HTMLButtonElement): Promise<void> {
     if (pending || closed || button.disabled) return;
     pending = true;
-    error.hidden = true;
+    showError(null);
     updateControls();
     try {
       if (button.dataset.team) await options.onTeamSelect?.(button.dataset.team);
@@ -480,8 +556,8 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
     } catch (reason) {
       if (closed) return;
       pending = false;
-      error.textContent = reason instanceof Error ? reason.message : String(reason);
-      error.hidden = false;
+      const detail = (reason instanceof Error ? reason.message : String(reason ?? '')).trim();
+      showError(detail || 'Could not select model.');
       renderChoices();
       search.focus({ preventScroll: true });
     }
@@ -502,9 +578,13 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
     close();
   }
 
-  /** Tab cycles search → rail → effort → speed inside the picker and never leaves it. */
+  /** Tab cycles search → rail → (a shown failure or error) → effort → speed inside the picker and never leaves it. */
   function cycleFocus(back: boolean): void {
-    const stops = [search, rail.querySelector<HTMLElement>('[tabindex="0"]'), ...(settings.hidden ? [] : settings.querySelectorAll<HTMLElement>('.selected:not(:disabled)'))].filter((stop): stop is HTMLElement => Boolean(stop));
+    const stops = [
+      search, rail.querySelector<HTMLElement>('[tabindex="0"]'),
+      failureBox.hidden ? null : failureBox, error.hidden ? null : error,
+      ...(settings.hidden ? [] : settings.querySelectorAll<HTMLElement>('.selected:not(:disabled)')),
+    ].filter((stop): stop is HTMLElement => Boolean(stop));
     const index = stops.findIndex(stop => stop.contains(document.activeElement));
     stops[(index + (back ? -1 : 1) + stops.length) % stops.length].focus({ preventScroll: true });
   }
@@ -533,11 +613,70 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
     const button = (event.target as Element).closest<HTMLButtonElement>('.model-menu-option');
     if (button && !pending && !button.disabled && !button.classList.contains('model-menu-active')) setActive(button);
   });
-  panel.addEventListener('click', event => event.stopPropagation());
+  for (const eventName of ['pointerdown', 'mousedown']) panel.addEventListener(eventName, event => {
+    const el = event.target instanceof Element ? event.target : event.target instanceof Node ? event.target.parentElement : null;
+    if (el === listContainer || el === rail) return;
+    if (!el?.closest('input:not(:disabled), button:not(:disabled), a[href], [role="radio"]:not(:disabled), .model-menu-failure, .model-menu-error')) event.preventDefault();
+  });
+  panel.addEventListener('click', event => {
+    event.stopPropagation();
+    if ((event.target === listContainer || event.target === rail) && !panel.contains(document.activeElement) && window.getSelection()?.isCollapsed !== false) search.focus({ preventScroll: true });
+  });
+  // Chromium places the press caret at the exact (fractional) pointer position but resolves the drag's base from the floored
+  // one; when the two straddle a caret boundary (HiDPI, synthetic input) the drag only moves a collapsed caret and selects
+  // nothing. A failure or error is text to copy, so a drag that left the selection collapsed extends it from the press point.
+  let dragAnchor: { box: HTMLElement; node: Node; offset: number; x: number; y: number } | null = null;
+  function caretAt(box: HTMLElement, x: number, y: number): { node: Node; offset: number } | null {
+    const doc = document as Document & {
+      caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+      caretRangeFromPoint?: (x: number, y: number) => Range | null;
+    };
+    const position = doc.caretPositionFromPoint?.(x, y);
+    if (position) return box.contains(position.offsetNode) ? { node: position.offsetNode, offset: position.offset } : null;
+    const range = doc.caretRangeFromPoint?.(x, y);
+    return range && box.contains(range.startContainer) ? { node: range.startContainer, offset: range.startOffset } : null;
+  }
+  // Any press in the panel ends the last drag; the box's own handler then starts a new one.
+  panel.addEventListener('pointerdown', () => { dragAnchor = null; }, true);
+  function installDragSelect(box: HTMLElement): void {
+    box.addEventListener('pointerdown', event => {
+      const caret = event.pointerType === 'mouse' && event.button === 0 && !event.shiftKey ? caretAt(box, event.clientX, event.clientY) : null;
+      dragAnchor = caret && { box, ...caret, x: event.clientX, y: event.clientY };
+    });
+    box.addEventListener('pointermove', event => {
+      if (!dragAnchor || dragAnchor.box !== box) return;
+      // A release outside the window, or new text under the anchor, ends the drag.
+      if (!(event.buttons & 1) || !dragAnchor.node.isConnected) { dragAnchor = null; return; }
+      const selection = window.getSelection();
+      // Only a caret that left the press point marks the failed drag; a working drag is never touched.
+      if (!selection?.isCollapsed || (selection.anchorNode === dragAnchor.node && selection.anchorOffset === dragAnchor.offset)) return;
+      if (Math.hypot(event.clientX - dragAnchor.x, event.clientY - dragAnchor.y) < 3) return;
+      const caret = caretAt(box, event.clientX, event.clientY);
+      if (caret) selection.setBaseAndExtent(dragAnchor.node, dragAnchor.offset, caret.node, caret.offset);
+    });
+    box.addEventListener('pointerup', () => { dragAnchor = null; });
+    box.addEventListener('pointercancel', () => { dragAnchor = null; });
+  }
+  installDragSelect(failureBox);
+  installDragSelect(error);
+  /** Select-all scoped to one box, so copying a focused failure or error never grabs the whole workspace. */
+  function selectAllText(node: HTMLElement): void {
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
   panel.addEventListener('keydown', event => {
     const target = event.target as HTMLElement;
     const key = event.key;
     if (key === 'Tab') { event.preventDefault(); cycleFocus(event.shiftKey); return; }
+    if (target !== search && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && key.toLowerCase() === 'a') {
+      event.preventDefault();
+      if (target === failureBox || target === error) selectAllText(target);
+      return;
+    }
     // Typing always goes to search.
     if (target !== search && key.length === 1 && key !== ' ' && !event.metaKey && !event.ctrlKey && !event.altKey) { search.focus({ preventScroll: true }); return; }
     const radio = target.closest<HTMLButtonElement>('[role="radio"]');
@@ -559,7 +698,19 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
       else if (key === 'Enter' || key === 'ArrowRight') { event.preventDefault(); search.focus({ preventScroll: true }); }
       return;
     }
+    // A focused failure reads the list card; a focused error scrolls itself.
+    if (target === failureBox || target === error) {
+      if (!event.metaKey && !event.ctrlKey && !event.altKey && scrollBox(target === error ? error : listContainer, key, event.shiftKey)) event.preventDefault();
+      return;
+    }
     if (target !== search || isImeKey(event)) return;
+    // Nothing to pick (a failed catalog): the arrows and Page keys read the list instead.
+    if (!enabledButtons().length && listContainer.scrollHeight > listContainer.clientHeight
+      && (['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp'].includes(key) || (!search.value && (key === 'Home' || key === 'End')))) {
+      event.preventDefault();
+      scrollBox(listContainer, key, false);
+      return;
+    }
     if (key === 'ArrowDown' || key === 'ArrowUp') { event.preventDefault(); moveActive(key === 'ArrowDown' ? 1 : -1); }
     else if (key === 'Home' || key === 'End') { event.preventDefault(); moveActive(key === 'Home' ? 'first' : 'last'); }
     else if ((key === 'ArrowLeft' || key === 'ArrowRight') && !search.value) { event.preventDefault(); stepView(key === 'ArrowRight' ? 1 : -1, false); }
@@ -591,7 +742,7 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
       void Promise.resolve().then(() => loadModels(provider.id)).then(models => {
         if (closed) return;
         provider.models = models;
-      }).catch(reason => { if (!closed) catalogErrors.set(provider.id, reason instanceof Error ? reason.message : String(reason ?? '')); }).finally(() => {
+      }).catch(reason => { if (!closed) catalogErrors.set(provider.id, (reason instanceof Error ? reason.message : String(reason ?? '')).trim()); }).finally(() => {
         if (closed) return;
         catalogLoading.delete(provider.id);
         renderChoices();
@@ -602,12 +753,14 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
   if (options.loadProviders) {
     void options.loadProviders().then(found => {
       if (closed) return;
+      providersError = '';
       providers = found.map(provider => ({ ...provider, models: [...provider.models] }));
       providersStatus = providers.length ? '' : 'No harnesses on this computer';
       loadCatalogs();
     }).catch(failure => {
       if (closed) return;
-      providersStatus = failure instanceof Error ? failure.message : String(failure);
+      providersStatus = '';
+      providersError = (failure instanceof Error ? failure.message : String(failure ?? '')).trim() || 'Could not load harnesses.';
       renderChoices();
     });
   } else loadCatalogs();

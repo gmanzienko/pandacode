@@ -40,6 +40,9 @@ html[data-theme] .model-menu-tab.is-dim:not(:hover,[aria-selected="true"]){color
 /* The inset panel: the inner-card fill, a hairline as the shell's panels have, the soft card shadow. */
 .model-menu-list{display:flex;flex-direction:column;padding:2px;border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner);background:var(--ds-card-inner);box-shadow:var(--ds-shadow-card)}
 .model-menu-list>*{flex-shrink:0}
+/* The listbox inside the card: rows only, so the failure's alert beside it is never one of its options. */
+.model-menu-options{display:flex;flex-direction:column;flex-shrink:0}
+.model-menu-options>*{flex-shrink:0}
 .model-menu-group-heading{display:flex;align-items:center;gap:var(--space-2);height:var(--row);padding:0 var(--space-2);color:var(--muted)}
 .model-menu-group-heading>:is(.provider-logo,.icon){width:var(--icon-md);height:var(--icon-md);flex-shrink:0}
 .model-menu-group-name{flex:1;min-width:0;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:var(--ds-text-chip);font-weight:var(--weight-regular);letter-spacing:var(--ds-row-tracking)}
@@ -70,7 +73,11 @@ html[data-theme] .model-menu-tab.is-dim:not(:hover,[aria-selected="true"]){color
 .model-menu-stack>*+*{margin-left:-3px}
 
 .model-menu-empty{margin:var(--space-2);color:var(--muted);font-size:var(--ds-text-chip);line-height:var(--leading-ui);overflow-wrap:anywhere}
-.model-menu-error{flex-shrink:0;margin:0 calc(var(--model-gap) + var(--space-2)) var(--model-gap);color:var(--ds-danger);font-size:var(--ds-text-chip);line-height:var(--leading-ui);overflow-wrap:anywhere}
+/* A failed catalog's full diagnostic, under the disabled rows: it scrolls with the list and can be selected and copied. */
+.model-menu-failure{margin:var(--space-2);padding:var(--space-2);border-radius:var(--ds-radius-control);background:color-mix(in srgb,var(--ds-danger) 8%,transparent);color:var(--ds-danger);font-size:var(--ds-text-chip);line-height:var(--leading-ui);white-space:pre-wrap;overflow-wrap:anywhere;cursor:text;-webkit-user-select:text;user-select:text}
+html[data-theme="dark"] .model-menu-failure{background:color-mix(in srgb,var(--ds-danger) 6%,transparent);color:color-mix(in srgb,var(--ds-danger) 72%,var(--text))}
+/* Bounded, so a long selection or effort error never squashes the rail and list above it. */
+.model-menu-error{flex-shrink:0;max-height:120px;overflow:auto;margin:0 calc(var(--model-gap) + var(--space-2)) var(--model-gap);color:var(--ds-danger);font-size:var(--ds-text-chip);line-height:var(--leading-ui);white-space:pre-wrap;overflow-wrap:anywhere;cursor:text;-webkit-user-select:text;user-select:text}
 .model-menu-pending{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 
 /* Harnesses without a logo asset (provider-logos.ts): a neutral letter at the logo's size. */
@@ -92,6 +99,9 @@ html[data-theme] .model-menu-tab.is-dim:not(:hover,[aria-selected="true"]){color
 .model-menu-effort-hint{margin:var(--space-1) 0 0;padding-left:var(--space-2);min-height:1lh;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--faint);font-size:var(--text-xs);line-height:var(--leading-ui)}
 
 .model-menu :is(.model-menu-tab,.model-menu-option,.model-menu-effort>button):focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
+/* Shown failures and errors are Tab stops (keyboard scrolling, copying); focus draws the ring, a click draws nothing. */
+.model-menu :is(.model-menu-failure,.model-menu-error):focus{outline:none}
+.model-menu :is(.model-menu-failure,.model-menu-error):focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
 
 /* Narrow windows keep only the rail's logos; the track takes the whole footer. */
 @media (max-width:519px){
@@ -106,10 +116,12 @@ html[data-theme] .model-menu-tab.is-dim:not(:hover,[aria-selected="true"]){color
   .model-menu :is(.model-menu-current,.model-menu-tab[aria-selected="true"]){outline:1px solid var(--focus);outline-offset:-1px}
   .model-menu :is(.model-menu-meta,.model-menu-count,.model-menu-effort-hint){color:var(--text)}
   .model-menu :is(.model-menu-list,.model-menu-effort){border-color:var(--text);box-shadow:none}
+  html .model-menu :is(.model-menu-failure,.model-menu-error){background:none;border:1px solid currentColor}
 }
 @media (forced-colors:active){
   .model-menu :is(.icon,.provider-logo){color:CanvasText}
   .model-menu :is(.model-menu-list,.model-menu-effort){border:1px solid CanvasText}
+  html .model-menu :is(.model-menu-failure,.model-menu-error){background:none;border:1px solid CanvasText}
   .model-menu :is(.model-menu-current,.model-menu-active,.model-menu-tab[aria-selected="true"]){outline:1px solid Highlight;outline-offset:-1px}
   .model-menu-effort>.segment-thumb{forced-color-adjust:none;background:Highlight}
   .model-menu-effort>button[aria-checked="true"]{forced-color-adjust:none;color:HighlightText}

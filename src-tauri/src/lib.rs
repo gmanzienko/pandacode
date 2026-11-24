@@ -2931,12 +2931,12 @@ async fn list_providers(app: tauri::AppHandle, force: Option<bool>, device_id: O
 /// This computer's harnesses; `force` drops the cached ACP catalogs first.
 pub(crate) async fn local_providers(force: bool) -> Vec<providers::ProviderInfo> {
     if force {
-        providers::acp_catalog::invalidate("antigravity");
-        providers::acp_catalog::invalidate("grok");
-        providers::acp_catalog::invalidate("devin");
-        providers::acp_catalog::invalidate("zcode");
-        providers::acp_catalog::invalidate("hermes");
-        providers::acp_catalog::invalidate("qoder");
+        providers::invalidate_catalog("antigravity");
+        providers::invalidate_catalog("grok");
+        providers::invalidate_catalog("devin");
+        providers::invalidate_catalog("zcode");
+        providers::invalidate_catalog("hermes");
+        providers::invalidate_catalog("qoder");
     }
     tauri::async_runtime::spawn_blocking(providers::discover)
         .await
@@ -2951,7 +2951,7 @@ async fn list_provider_models(app: tauri::AppHandle, provider: String, force: Op
     serde_json::to_value(local_provider_models(&provider, force).await?).map_err(|e| e.to_string())
 }
 pub(crate) async fn local_provider_models(provider: &str, force: bool) -> Result<Vec<providers::ModelInfo>> {
-    if force { providers::acp_catalog::invalidate(provider); }
+    if force { providers::invalidate_catalog(provider); }
     providers::list_models(provider).await
 }
 

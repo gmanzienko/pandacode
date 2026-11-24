@@ -1,16 +1,20 @@
 //! Platform-aware harness launch without putting model settings through a batch shell.
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     io::Read,
     path::{Component, Path, PathBuf},
 };
 
+/// The bundle's built-in provider catalog that ZCode 3.19+ reads at startup.
+const ZCODE_BUILTIN_CONFIG_ENV: &str = "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE";
+
 struct Launch {
     program: PathBuf,
     args: Vec<OsString>,
-    /// One environment override the launch choice itself implies (`ELECTRON_RUN_AS_NODE`
-    /// when a desktop app's own runtime runs its bundled CLI).
-    env: Option<(&'static str, &'static str)>,
+    /// Environment overrides the launch choice itself implies (`ELECTRON_RUN_AS_NODE`
+    /// and the bundle's provider config when a desktop app's own runtime runs its
+    /// bundled CLI).
+    env: Vec<(&'static str, OsString)>,
 }
 
 /// Canonical Windows paths are useful for native file operations, but Node and
@@ -66,6 +70,66 @@ fn ordinary_windows_path(path: &str) -> Option<String> {
 }
 
 fn resolve(path: &Path, windows: bool) -> Result<Launch, String> {
+    resolve_for(path, windows, &|key| std::env::var_os(key))
+}
+
+/// ZCode's bundled CLI: `glm/zcode.cjs` inside a desktop app's resources.
+fn is_bundled_zcode(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == "zcode.cjs")
+        && path.parent().and_then(Path::file_name).is_some_and(|name| name == "glm")
+}
+
+/// Keeps a bundled Electron CLI in headless Node mode even if Settings or a named
+/// connection defines a conflicting `ELECTRON_RUN_AS_NODE` value, and restores the
+/// bundle's built-in provider config when they blank it out.
+pub(crate) fn enforce_runtime_invariants(path: &Path, command: &mut impl crate::child_env::EnvTarget) {
+    enforce_runtime_invariants_for(path, cfg!(windows), command)
+}
+
+fn enforce_runtime_invariants_for(
+    path: &Path,
+    windows: bool,
+    command: &mut impl crate::child_env::EnvTarget,
+) {
+    if !is_bundled_zcode(path) || electron_runtime(path).is_none() {
+        return;
+    }
+    command.set_var(OsStr::new("ELECTRON_RUN_AS_NODE"), OsStr::new("1"));
+    let key = OsStr::new(ZCODE_BUILTIN_CONFIG_ENV);
+    // A non-empty value from the environment, Settings or a named connection wins.
+    if command.effective_var(key).is_some_and(|value| non_empty_env(&value)) {
+        return;
+    }
+    if let Some(builtin) = bundled_zcode_builtin_config(path, windows) {
+        command.set_var(key, &builtin);
+    }
+}
+
+/// An environment value that says something: not unset, empty or only whitespace.
+fn non_empty_env(value: &OsStr) -> bool {
+    !value.to_string_lossy().trim().is_empty()
+}
+
+/// The bundle's `resources/config/provider/zcode-builtin.json` beside `glm/zcode.cjs`,
+/// in the form external tools expect. Joined part by part: `ordinary_windows_path`
+/// refuses `/` inside a component.
+fn bundled_zcode_builtin_config(path: &Path, windows: bool) -> Option<OsString> {
+    let builtin = path
+        .ancestors()
+        .nth(2)?
+        .join("config")
+        .join("provider")
+        .join("zcode-builtin.json");
+    builtin
+        .is_file()
+        .then(|| external_path_for(&builtin, windows).into_os_string())
+}
+
+fn resolve_for(
+    path: &Path,
+    windows: bool,
+    env_var: &impl Fn(&str) -> Option<OsString>,
+) -> Result<Launch, String> {
     let batch = path.extension().is_some_and(|extension| {
         extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
     });
@@ -78,13 +142,23 @@ fn resolve(path: &Path, windows: bool) -> Result<Launch, String> {
         // ZCode's bundled CLI (`glm/zcode.cjs`) is built for the app's own Electron
         // runtime, which exists even where no system node does. Nothing else gets
         // ELECTRON_RUN_AS_NODE, however it sits inside an app bundle.
-        let bundled_zcode = path.file_name().is_some_and(|name| name == "zcode.cjs")
-            && path.parent().and_then(Path::file_name).is_some_and(|name| name == "glm");
-        if let Some(runtime) = bundled_zcode.then(|| electron_runtime(path)).flatten() {
+        if let Some(runtime) = is_bundled_zcode(path).then(|| electron_runtime(path)).flatten() {
+            let mut env = vec![("ELECTRON_RUN_AS_NODE", OsString::from("1"))];
+            // ZCode 3.19+ reads its built-in provider catalog from the bundle; the
+            // personal config stays unset so the CLI seeds it under ~/.zcode/v2.
+            // An unset, empty or whitespace-only value falls back to the bundle's.
+            if !env_var(ZCODE_BUILTIN_CONFIG_ENV).is_some_and(|value| non_empty_env(&value)) {
+                if let Some(builtin) = bundled_zcode_builtin_config(path, windows) {
+                    env.push((ZCODE_BUILTIN_CONFIG_ENV, builtin));
+                }
+            }
+            // No NODE_PATH: `zcode.cjs` loads `@napi-rs/keyring` through native ESM
+            // `import()`, which ignores NODE_PATH, and `app-server` never loads it
+            // (verified on ZCode 3.19.1 and 4.0.0).
             return Ok(Launch {
                 program: external_path_for(&runtime, windows),
                 args: vec![external_path_for(path, windows).into_os_string()],
-                env: Some(("ELECTRON_RUN_AS_NODE", "1")),
+                env,
             });
         }
         if !windows {
@@ -92,7 +166,7 @@ fn resolve(path: &Path, windows: bool) -> Result<Launch, String> {
             return Ok(Launch {
                 program: external_path_for(path, windows),
                 args: Vec::new(),
-                env: None,
+                env: Vec::new(),
             });
         }
         // Windows cannot exec a Node script directly; start it under node.
@@ -104,7 +178,7 @@ fn resolve(path: &Path, windows: bool) -> Result<Launch, String> {
         return Ok(Launch {
             program: external_path_for(path, windows),
             args: Vec::new(),
-            env: None,
+            env: Vec::new(),
         });
     }
     // npm shims forward arguments through cmd.exe. Launch their declared bin
@@ -161,7 +235,7 @@ fn resolve(path: &Path, windows: bool) -> Result<Launch, String> {
         return Ok(Launch {
             program: external_path_for(&script, windows),
             args: Vec::new(),
-            env: None,
+            env: Vec::new(),
         });
     }
     node_launch(&script, directory)
@@ -176,28 +250,60 @@ fn node_launch(script: &Path, directory: &Path) -> Result<Launch, String> {
     Ok(Launch {
         program: external_path_for(&node, true),
         args: vec![external_path_for(script, true).into_os_string()],
-        env: None,
+        env: Vec::new(),
     })
 }
 
 /// The Electron binary a desktop app bundles beside a Node script. Run-as-node is
 /// a plain node, and the bundled CLIs (ZCode) are built for exactly that runtime,
-/// which is there even where no system node is.
-#[cfg(target_os = "macos")]
+/// which is there even where no system node is. Only a clean absolute script path
+/// counts: a relative or `..` path could resolve the runtime against another folder.
 pub(super) fn electron_runtime(script: &Path) -> Option<PathBuf> {
+    if !is_clean_absolute(script) {
+        return None;
+    }
+    platform_electron_runtime(script)
+}
+
+pub(super) fn is_clean_absolute(path: &Path) -> bool {
+    if !path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        matches!(path.components().next(), Some(Component::Prefix(p)) if matches!(p.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)))
+    }
+    #[cfg(not(windows))]
+    {
+        let raw = path.as_os_str().to_string_lossy();
+        !raw.starts_with("//") && !raw.starts_with(r"\\")
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_app_bundle_name(file_name: &str) -> Option<&str> {
+    file_name.strip_suffix(".app").filter(|name| !name.is_empty())
+}
+
+#[cfg(target_os = "macos")]
+fn platform_electron_runtime(script: &Path) -> Option<PathBuf> {
     // …/ZCode.app/Contents/Resources/<…>/cli.cjs runs on …/Contents/MacOS/ZCode.
-    let contents = script.ancestors().nth(3)?;
+    let resources = script.ancestors().nth(2)?;
+    if resources.file_name()?.to_str()? != "Resources" {
+        return None;
+    }
+    let contents = resources.parent()?;
     if contents.file_name()?.to_str()? != "Contents" {
         return None;
     }
     let app = contents.parent()?;
-    let name = app.file_name()?.to_str()?.strip_suffix(".app")?;
+    let name = macos_app_bundle_name(app.file_name()?.to_str()?)?;
     let binary = contents.join("MacOS").join(name);
     binary.is_file().then_some(binary)
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn electron_runtime(script: &Path) -> Option<PathBuf> {
+fn platform_electron_runtime(script: &Path) -> Option<PathBuf> {
     // <root>\resources\<…>\cli.cjs runs on <root>\<name>.exe.
     let resources = script.ancestors().nth(2)?;
     if !resources.file_name()?.to_str()?.eq_ignore_ascii_case("resources") {
@@ -210,7 +316,7 @@ pub(super) fn electron_runtime(script: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub(super) fn electron_runtime(script: &Path) -> Option<PathBuf> {
+fn platform_electron_runtime(script: &Path) -> Option<PathBuf> {
     // <root>/resources/<…>/cli.cjs runs on <root>/<executable name>.
     let resources = script.ancestors().nth(2)?;
     if resources.file_name()?.to_str()? != "resources" {
@@ -338,10 +444,10 @@ pub(crate) fn command(path: &Path) -> Result<tokio::process::Command, String> {
     let launch = resolve(path, cfg!(windows))?;
     let mut command = tokio::process::Command::new(launch.program);
     command.args(launch.args);
-    if let Some((key, value)) = launch.env {
+    crate::child_env::sanitize(&mut command);
+    for (key, value) in launch.env {
         command.env(key, value);
     }
-    crate::child_env::sanitize(&mut command);
     command.args(super::privacy::arguments(&harness_name(path)));
     for (name, value) in super::privacy::environment() {
         command.env(name, value);
@@ -355,10 +461,10 @@ pub(crate) fn std_command(path: &Path) -> Result<std::process::Command, String> 
     let launch = resolve(path, cfg!(windows))?;
     let mut command = std::process::Command::new(launch.program);
     command.args(launch.args);
-    if let Some((key, value)) = launch.env {
+    crate::child_env::sanitize(&mut command);
+    for (key, value) in launch.env {
         command.env(key, value);
     }
-    crate::child_env::sanitize(&mut command);
     command.args(super::privacy::arguments(&harness_name(path)));
     for (name, value) in super::privacy::environment() {
         command.env(name, value);
@@ -375,10 +481,10 @@ pub(crate) fn pty_command(path: &Path) -> Result<portable_pty::CommandBuilder, S
     let launch = resolve(path, cfg!(windows))?;
     let mut command = portable_pty::CommandBuilder::new(launch.program);
     command.args(launch.args);
-    if let Some((key, value)) = launch.env {
+    crate::child_env::sanitize(&mut command);
+    for (key, value) in launch.env {
         command.env(key, value);
     }
-    crate::child_env::sanitize(&mut command);
     command.args(super::privacy::arguments(&harness_name(path)));
     for (name, value) in super::privacy::environment() {
         command.env(name, value);
@@ -668,6 +774,7 @@ pub(super) fn find(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::child_env::EnvTarget;
     use std::fs;
     #[test]
     fn windows_external_paths_remove_only_safe_namespace_prefixes() {
@@ -824,7 +931,7 @@ mod tests {
         let launch = resolve(&script, false).unwrap();
         assert_eq!(launch.program, external_path_for(&script, false));
         assert!(launch.args.is_empty());
-        assert_eq!(launch.env, None);
+        assert!(launch.env.is_empty());
     }
 
     #[cfg(target_os = "macos")]
@@ -836,7 +943,7 @@ mod tests {
         let launch = resolve(&script, false).unwrap();
         assert_eq!(launch.program, external_path_for(&binary, false));
         assert_eq!(launch.args, [external_path_for(&script, true).into_os_string()]);
-        assert_eq!(launch.env, Some(("ELECTRON_RUN_AS_NODE", "1")));
+        assert_eq!(launch.env, [("ELECTRON_RUN_AS_NODE", OsString::from("1"))]);
     }
 
     #[cfg(target_os = "linux")]
@@ -848,7 +955,7 @@ mod tests {
         let launch = resolve(&script, false).unwrap();
         assert_eq!(launch.program, external_path_for(&binary, false));
         assert_eq!(launch.args, [external_path_for(&script, true).into_os_string()]);
-        assert_eq!(launch.env, Some(("ELECTRON_RUN_AS_NODE", "1")));
+        assert_eq!(launch.env, [("ELECTRON_RUN_AS_NODE", OsString::from("1"))]);
     }
 
     #[cfg(target_os = "windows")]
@@ -860,7 +967,7 @@ mod tests {
         let launch = resolve(&script, true).unwrap();
         assert_eq!(launch.program, external_path_for(&binary, true));
         assert_eq!(launch.args, [external_path_for(&script, true).into_os_string()]);
-        assert_eq!(launch.env, Some(("ELECTRON_RUN_AS_NODE", "1")));
+        assert_eq!(launch.env, [("ELECTRON_RUN_AS_NODE", OsString::from("1"))]);
     }
 
     /// Any other script at the bundled CLI's depth stays out of the app's runtime,
@@ -880,8 +987,320 @@ mod tests {
             let script = f.file(&format!("{resources}/{name}"), "#!/usr/bin/env node\n");
             fs::write(script.with_file_name("node.exe"), "").unwrap();
             let launch = resolve(&script, cfg!(windows)).unwrap();
-            assert_eq!(launch.env, None, "{name}");
+            assert!(launch.env.is_empty(), "{name}");
             assert_ne!(launch.program, f.0.join(binary), "{name}");
+        }
+    }
+
+    /// The fixture's bundled-app layout for this platform: (resources, runtime binary).
+    fn bundle_layout() -> (&'static str, &'static str) {
+        if cfg!(target_os = "macos") {
+            ("ZCode.app/Contents/Resources", "ZCode.app/Contents/MacOS/ZCode")
+        } else if cfg!(windows) {
+            ("ZCode/resources", "ZCode/ZCode.exe")
+        } else {
+            ("ZCode/resources", "ZCode/zcode")
+        }
+    }
+
+    fn env_value<'a>(launch: &'a Launch, key: &str) -> Option<&'a OsString> {
+        launch.env.iter().find(|(name, _)| *name == key).map(|(_, value)| value)
+    }
+
+    #[test]
+    fn bundled_zcode_points_at_the_bundles_builtin_provider_config() {
+        let f = Fixture::new();
+        let (resources, binary) = bundle_layout();
+        f.file(binary, "");
+        let script = f.file(&format!("{resources}/glm/zcode.cjs"), "#!/usr/bin/env node\n");
+        let builtin = f.file(&format!("{resources}/config/provider/zcode-builtin.json"), "{}");
+        let windows = cfg!(windows);
+        let launch = resolve_for(&script, windows, &|_| None).unwrap();
+        let value = env_value(&launch, "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE").expect("builtin config");
+        assert_eq!(value, external_path_for(&builtin, windows).as_os_str());
+        if windows {
+            assert!(!value.to_string_lossy().starts_with(r"\\?\"), "{value:?}");
+        }
+        assert!(env_value(&launch, "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE").is_none());
+        // An explicit non-empty setting wins; an empty one does not count.
+        let launch = resolve_for(&script, windows, &|key| {
+            (key == "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE").then(|| OsString::from("/custom.json"))
+        })
+        .unwrap();
+        assert!(env_value(&launch, "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE").is_none());
+        let launch = resolve_for(&script, windows, &|key| {
+            (key == "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE").then(OsString::new)
+        })
+        .unwrap();
+        assert!(env_value(&launch, "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE").is_some());
+    }
+
+    #[test]
+    fn bundled_zcode_never_sets_node_path() {
+        let f = Fixture::new();
+        let (resources, binary) = bundle_layout();
+        f.file(binary, "");
+        let script = f.file(&format!("{resources}/glm/zcode.cjs"), "#!/usr/bin/env node\n");
+        f.file(&format!("{resources}/app.asar"), "");
+        let launch = resolve_for(&script, cfg!(windows), &|_| None).unwrap();
+        assert!(env_value(&launch, "NODE_PATH").is_none());
+        let inherited = OsString::from("/other_modules");
+        let launch = resolve_for(&script, cfg!(windows), &|key| {
+            (key == "NODE_PATH").then(|| inherited.clone())
+        })
+        .unwrap();
+        assert!(env_value(&launch, "NODE_PATH").is_none());
+        assert_eq!(launch.env, [("ELECTRON_RUN_AS_NODE", OsString::from("1"))]);
+    }
+
+    #[test]
+    fn bundled_zcode_omits_config_the_bundle_lacks() {
+        let f = Fixture::new();
+        let (resources, binary) = bundle_layout();
+        f.file(binary, "");
+        let script = f.file(&format!("{resources}/glm/zcode.cjs"), "#!/usr/bin/env node\n");
+        let launch = resolve_for(&script, cfg!(windows), &|_| None).unwrap();
+        assert_eq!(launch.env, [("ELECTRON_RUN_AS_NODE", OsString::from("1"))]);
+    }
+
+    /// A script under `Contents/<other>` is not in the bundle's Resources, so it
+    /// never runs on the app's Electron binary.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_scripts_outside_resources_skip_the_apps_runtime() {
+        let f = Fixture::new();
+        f.file("ZCode.app/Contents/MacOS/ZCode", "");
+        let script = f.file("ZCode.app/Contents/Other/glm/zcode.cjs", "#!/usr/bin/env node\n");
+        f.file("ZCode.app/Contents/Other/config/provider/zcode-builtin.json", "{}");
+        assert_eq!(electron_runtime(&script), None);
+        let launch = resolve_for(&script, false, &|_| None).unwrap();
+        assert!(launch.env.is_empty());
+    }
+
+    #[derive(Default)]
+    struct EnvRecorder {
+        /// The simulated process environment the child would inherit.
+        inherited: Vec<(OsString, OsString)>,
+        /// Overrides in order: `Some` sets a value, `None` removes it.
+        ops: Vec<(OsString, Option<OsString>)>,
+    }
+    impl EnvRecorder {
+        fn inheriting(key: &str, value: &str) -> Self {
+            Self { inherited: vec![(key.into(), value.into())], ops: Vec::new() }
+        }
+        /// A value set before the invariants run (Settings or a named connection).
+        fn overridden(key: &str, value: &str) -> Self {
+            Self { inherited: Vec::new(), ops: vec![(key.into(), Some(value.into()))] }
+        }
+    }
+    impl EnvTarget for EnvRecorder {
+        fn set_var(&mut self, key: &OsStr, value: &OsStr) {
+            self.ops.push((key.to_owned(), Some(value.to_owned())));
+        }
+        fn remove_var(&mut self, key: &OsStr) {
+            self.ops.push((key.to_owned(), None));
+        }
+        fn effective_var(&self, key: &OsStr) -> Option<OsString> {
+            match self.ops.iter().rev().find(|(name, _)| name == key) {
+                Some((_, value)) => value.clone(),
+                None => self
+                    .inherited
+                    .iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.clone()),
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_invariants_keep_bundled_zcode_in_node_mode() {
+        let f = Fixture::new();
+        let (resources, binary) = bundle_layout();
+        f.file(binary, "");
+        let script = f.file(&format!("{resources}/glm/zcode.cjs"), "#!/usr/bin/env node\n");
+        let mut recorder = EnvRecorder::default();
+        enforce_runtime_invariants(&script, &mut recorder);
+        assert_eq!(
+            recorder.ops,
+            [(OsString::from("ELECTRON_RUN_AS_NODE"), Some(OsString::from("1")))]
+        );
+        for name in ["glm/other.cjs", "tools/zcode.cjs"] {
+            let other = f.file(&format!("{resources}/{name}"), "#!/usr/bin/env node\n");
+            let mut recorder = EnvRecorder::default();
+            enforce_runtime_invariants(&other, &mut recorder);
+            assert!(recorder.ops.is_empty(), "{name}");
+        }
+        // A standalone `glm/zcode.cjs` with no app runtime beside it is left alone.
+        let standalone = f.file("standalone/glm/zcode.cjs", "#!/usr/bin/env node\n");
+        let mut recorder = EnvRecorder::default();
+        enforce_runtime_invariants(&standalone, &mut recorder);
+        assert!(recorder.ops.is_empty());
+    }
+
+    /// A bundled-app fixture with the built-in provider config: (fixture, script, builtin).
+    fn bundle_with_builtin_config() -> (Fixture, PathBuf, PathBuf) {
+        let f = Fixture::new();
+        let (resources, binary) = bundle_layout();
+        f.file(binary, "");
+        let script = f.file(&format!("{resources}/glm/zcode.cjs"), "#!/usr/bin/env node\n");
+        let builtin = f.file(&format!("{resources}/config/provider/zcode-builtin.json"), "{}");
+        (f, script, builtin)
+    }
+
+    #[test]
+    fn runtime_invariants_restore_the_bundle_config_over_blank_values() {
+        let (_f, script, builtin) = bundle_with_builtin_config();
+        let windows = cfg!(windows);
+        let expected = external_path_for(&builtin, windows).into_os_string();
+        let key = OsStr::new(ZCODE_BUILTIN_CONFIG_ENV);
+        for blank in ["", "   ", "\t \n"] {
+            // Settings or a named connection set a blank value after the launch env.
+            let mut recorder = EnvRecorder::overridden(ZCODE_BUILTIN_CONFIG_ENV, blank);
+            enforce_runtime_invariants_for(&script, windows, &mut recorder);
+            assert_eq!(recorder.effective_var(key).as_ref(), Some(&expected), "{blank:?}");
+            assert_eq!(
+                recorder.ops.last(),
+                Some(&(key.to_owned(), Some(expected.clone()))),
+                "{blank:?}"
+            );
+            // A blank inherited value with no override is restored the same way.
+            let mut recorder = EnvRecorder::inheriting(ZCODE_BUILTIN_CONFIG_ENV, blank);
+            enforce_runtime_invariants_for(&script, windows, &mut recorder);
+            assert_eq!(recorder.effective_var(key).as_ref(), Some(&expected), "{blank:?}");
+        }
+        // A removal counts as unset.
+        let mut recorder = EnvRecorder::inheriting(ZCODE_BUILTIN_CONFIG_ENV, "/custom.json");
+        recorder.remove_var(key);
+        enforce_runtime_invariants_for(&script, windows, &mut recorder);
+        assert_eq!(recorder.effective_var(key).as_ref(), Some(&expected));
+        // So does nothing at all.
+        let mut recorder = EnvRecorder::default();
+        enforce_runtime_invariants_for(&script, windows, &mut recorder);
+        assert_eq!(recorder.effective_var(key).as_ref(), Some(&expected));
+        if windows {
+            assert!(!expected.to_string_lossy().starts_with(r"\\?\"), "{expected:?}");
+        }
+    }
+
+    #[test]
+    fn runtime_invariants_keep_a_non_empty_builtin_config_override() {
+        let (_f, script, _builtin) = bundle_with_builtin_config();
+        let key = OsStr::new(ZCODE_BUILTIN_CONFIG_ENV);
+        let electron = (OsString::from("ELECTRON_RUN_AS_NODE"), Some(OsString::from("1")));
+        let mut recorder = EnvRecorder::overridden(ZCODE_BUILTIN_CONFIG_ENV, "/custom.json");
+        enforce_runtime_invariants_for(&script, cfg!(windows), &mut recorder);
+        assert_eq!(recorder.effective_var(key), Some(OsString::from("/custom.json")));
+        assert_eq!(recorder.ops.len(), 2);
+        assert_eq!(recorder.ops[1], electron);
+        let mut recorder = EnvRecorder::inheriting(ZCODE_BUILTIN_CONFIG_ENV, " /custom.json ");
+        enforce_runtime_invariants_for(&script, cfg!(windows), &mut recorder);
+        assert_eq!(recorder.effective_var(key), Some(OsString::from(" /custom.json ")));
+        assert_eq!(recorder.ops, [electron]);
+    }
+
+    #[test]
+    fn runtime_invariants_leave_other_scripts_and_config_less_bundles_alone() {
+        let (f, _script, _builtin) = bundle_with_builtin_config();
+        let (resources, _) = bundle_layout();
+        let key = OsStr::new(ZCODE_BUILTIN_CONFIG_ENV);
+        for name in ["glm/other.cjs", "tools/zcode.cjs"] {
+            let other = f.file(&format!("{resources}/{name}"), "#!/usr/bin/env node\n");
+            let mut recorder = EnvRecorder::overridden(ZCODE_BUILTIN_CONFIG_ENV, "");
+            enforce_runtime_invariants_for(&other, cfg!(windows), &mut recorder);
+            assert_eq!(recorder.ops.len(), 1, "{name}");
+            assert_eq!(recorder.effective_var(key), Some(OsString::new()), "{name}");
+        }
+        // A bundle without `zcode-builtin.json` keeps the blank value it was given.
+        let f = Fixture::new();
+        let (resources, binary) = bundle_layout();
+        f.file(binary, "");
+        let script = f.file(&format!("{resources}/glm/zcode.cjs"), "#!/usr/bin/env node\n");
+        let mut recorder = EnvRecorder::overridden(ZCODE_BUILTIN_CONFIG_ENV, "  ");
+        enforce_runtime_invariants_for(&script, cfg!(windows), &mut recorder);
+        assert_eq!(recorder.effective_var(key), Some(OsString::from("  ")));
+        assert_eq!(
+            recorder.ops.last(),
+            Some(&(OsString::from("ELECTRON_RUN_AS_NODE"), Some(OsString::from("1"))))
+        );
+    }
+
+    #[test]
+    fn whitespace_process_env_falls_back_to_the_bundle_config() {
+        let (_f, script, builtin) = bundle_with_builtin_config();
+        let windows = cfg!(windows);
+        for blank in ["", "   ", "\t"] {
+            let launch = resolve_for(&script, windows, &|key| {
+                (key == ZCODE_BUILTIN_CONFIG_ENV).then(|| OsString::from(blank))
+            })
+            .unwrap();
+            assert_eq!(
+                env_value(&launch, ZCODE_BUILTIN_CONFIG_ENV),
+                Some(&external_path_for(&builtin, windows).into_os_string()),
+                "{blank:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn macos_bundle_requires_a_name() {
+        assert_eq!(macos_app_bundle_name(".app"), None);
+        assert_eq!(macos_app_bundle_name("ZCode.app"), Some("ZCode"));
+    }
+
+    #[test]
+    fn clean_absolute_rejects_network_roots() {
+        for path in [r"\\server\share", r"\\?\UNC\server\share", "//server/share", r"\\.\C:\apps", r"\\?\Volume{123}\apps"] {
+            assert!(!is_clean_absolute(Path::new(path)), "{path}");
+        }
+        #[cfg(windows)]
+        for path in [r"C:\apps\ZCode", r"\\?\C:\apps\ZCode"] {
+            assert!(is_clean_absolute(Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn only_clean_absolute_scripts_find_an_electron_runtime() {
+        let (f, script, _builtin) = bundle_with_builtin_config();
+        assert!(is_clean_absolute(&script));
+        assert!(electron_runtime(&script).is_some());
+        // The same bundle reached through `..` is refused, as is any relative path.
+        let (resources, _) = bundle_layout();
+        let first = resources.split('/').next().unwrap();
+        // Ordinary (non-`\\?\`) form, so Windows itself would resolve the `..`.
+        let base = external_path_for(&f.0, cfg!(windows));
+        let traversal = resources
+            .split('/')
+            .fold(base.join(first).join(".."), |path, part| path.join(part))
+            .join("glm")
+            .join("zcode.cjs");
+        assert!(traversal.is_file(), "{traversal:?}");
+        assert!(!is_clean_absolute(&traversal));
+        assert_eq!(electron_runtime(&traversal), None);
+        let mut recorder = EnvRecorder::default();
+        enforce_runtime_invariants_for(&traversal, cfg!(windows), &mut recorder);
+        assert!(recorder.ops.is_empty());
+        let relative = resources
+            .split('/')
+            .fold(PathBuf::new(), |path, part| path.join(part))
+            .join("glm")
+            .join("zcode.cjs");
+        assert!(!is_clean_absolute(&relative));
+        assert_eq!(electron_runtime(&relative), None);
+        assert!(!is_clean_absolute(Path::new("..").join("ZCode").as_path()));
+    }
+
+    #[test]
+    fn other_scripts_get_no_bundle_environment() {
+        let f = Fixture::new();
+        let (resources, binary) = bundle_layout();
+        f.file(binary, "");
+        f.file(&format!("{resources}/config/provider/zcode-builtin.json"), "{}");
+        f.file(&format!("{resources}/app.asar"), "");
+        for name in ["glm/other.cjs", "tools/zcode.cjs"] {
+            let script = f.file(&format!("{resources}/{name}"), "#!/usr/bin/env node\n");
+            fs::write(script.with_file_name("node.exe"), "").unwrap();
+            let launch = resolve_for(&script, cfg!(windows), &|_| None).unwrap();
+            assert!(launch.env.is_empty(), "{name}");
         }
     }
 

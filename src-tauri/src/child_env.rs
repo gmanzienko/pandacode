@@ -44,6 +44,20 @@ fn appimage_overrides(vars: &[(OsString, OsString)]) -> Vec<(OsString, Option<Os
 pub(crate) trait EnvTarget {
     fn set_var(&mut self, key: &OsStr, value: &OsStr);
     fn remove_var(&mut self, key: &OsStr);
+    /// The value the child will see for `key`: the latest override (`None` after a
+    /// removal), else the value it inherits from this process.
+    fn effective_var(&self, key: &OsStr) -> Option<OsString>;
+}
+
+/// Environment names are case-insensitive on Windows and exact elsewhere.
+#[cfg(windows)]
+fn same_env_key(a: &OsStr, b: &OsStr) -> bool {
+    a == b || a.to_str().zip(b.to_str()).is_some_and(|(x, y)| x.eq_ignore_ascii_case(y))
+}
+
+#[cfg(not(windows))]
+fn same_env_key(a: &OsStr, b: &OsStr) -> bool {
+    a == b
 }
 
 impl EnvTarget for std::process::Command {
@@ -52,6 +66,12 @@ impl EnvTarget for std::process::Command {
     }
     fn remove_var(&mut self, key: &OsStr) {
         self.env_remove(key);
+    }
+    fn effective_var(&self, key: &OsStr) -> Option<OsString> {
+        match self.get_envs().filter(|(name, _)| same_env_key(name, key)).last() {
+            Some((_, value)) => value.map(OsStr::to_os_string),
+            None => std::env::var_os(key),
+        }
     }
 }
 
@@ -62,6 +82,9 @@ impl EnvTarget for tokio::process::Command {
     fn remove_var(&mut self, key: &OsStr) {
         self.env_remove(key);
     }
+    fn effective_var(&self, key: &OsStr) -> Option<OsString> {
+        self.as_std().effective_var(key)
+    }
 }
 
 impl EnvTarget for portable_pty::CommandBuilder {
@@ -70,6 +93,10 @@ impl EnvTarget for portable_pty::CommandBuilder {
     }
     fn remove_var(&mut self, key: &OsStr) {
         self.env_remove(key);
+    }
+    /// The builder starts from this process's environment, so its own map is complete.
+    fn effective_var(&self, key: &OsStr) -> Option<OsString> {
+        self.get_env(key).map(OsStr::to_os_string)
     }
 }
 
@@ -85,6 +112,55 @@ pub(crate) fn sanitize(command: &mut impl EnvTarget) {
             Some(value) => command.set_var(&key, &value),
             None => command.remove_var(&key),
         }
+    }
+}
+
+#[cfg(test)]
+mod effective_var_tests {
+    use super::*;
+
+    /// A name no real environment carries, so the inherited value is known to be absent.
+    const KEY: &str = "PANDACODE_CHILD_ENV_FIXTURE_7F3A";
+
+    #[test]
+    fn std_and_tokio_commands_report_the_latest_override() {
+        let key = OsStr::new(KEY);
+        let mut command = std::process::Command::new("fixture");
+        assert_eq!(command.effective_var(key), None);
+        command.set_var(key, OsStr::new("first"));
+        command.set_var(key, OsStr::new("second"));
+        assert_eq!(command.effective_var(key), Some(OsString::from("second")));
+        command.remove_var(key);
+        assert_eq!(command.effective_var(key), None);
+        let mut command = tokio::process::Command::new("fixture");
+        command.set_var(key, OsStr::new("   "));
+        assert_eq!(command.effective_var(key), Some(OsString::from("   ")));
+    }
+
+    #[test]
+    fn std_commands_fall_back_to_the_inherited_value() {
+        let command = std::process::Command::new("fixture");
+        assert_eq!(command.effective_var(OsStr::new("PATH")), std::env::var_os("PATH"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_names_match_case_insensitively() {
+        let mut command = std::process::Command::new("fixture");
+        command.set_var(OsStr::new(&KEY.to_ascii_lowercase()), OsStr::new("lower"));
+        assert_eq!(command.effective_var(OsStr::new(KEY)), Some(OsString::from("lower")));
+        assert!(same_env_key(OsStr::new("Path"), OsStr::new("PATH")));
+    }
+
+    #[test]
+    fn pty_builders_report_their_own_environment() {
+        let key = OsStr::new(KEY);
+        let mut command = portable_pty::CommandBuilder::new("fixture");
+        assert_eq!(command.effective_var(key), None);
+        command.set_var(key, OsStr::new("value"));
+        assert_eq!(command.effective_var(key), Some(OsString::from("value")));
+        command.remove_var(key);
+        assert_eq!(command.effective_var(key), None);
     }
 }
 

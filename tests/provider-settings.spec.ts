@@ -148,7 +148,12 @@ test('provider connections show the ZCode sign-in card', async ({ page }) => {
   const settings = page.getByRole('region', { name: 'Settings', exact: true });
   await settings.getByRole('tab', { name: 'Agents', exact: true }).click(); await settings.getByRole('tab', { name: 'Providers', exact: true }).click(); await page.locator('#settings-panel-providers details.connection-card').first().waitFor(); for (const s of await page.locator('#settings-panel-providers details.connection-card>summary').all()) await s.click();
   const card = page.locator('.connection-card').filter({ has: page.getByRole('heading', { name: 'ZCode', exact: false }) });
-  await expect(card).toContainText('Run zcode in a terminal and sign in');
+  await expect(card).toContainText('Uses the ZCode desktop app or standalone CLI');
+  await expect(card).toContainText('sign in via the ZCode desktop app');
+  await expect(card.locator('code', { hasText: /^zcode$/ })).toHaveCount(1);
+  await expect(card).toContainText('Provider Settings');
+  await expect(card).toContainText('or in ~/.zcode/v2/provider_config.json for the standalone CLI');
+  await expect(card).toContainText('GLM Coding Plan');
   await expect(card.getByRole('link', { name: 'ZCode docs' })).toHaveAttribute('href', 'https://github.com/zai-org/ZCode');
 });
 
@@ -670,3 +675,33 @@ test('Hermes Agent has an install card, four approval modes, and executable sett
   await expect(card.getByLabel('Hermes Agent executable', { exact: true })).toBeVisible();
 });
 
+
+
+test('provider settings ignore inherited maps and reserved roster IDs', async ({ page }) => {
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+  await page.route('**/src/preview.ts*', async route => {
+    const response = await route.fetch();
+    const source = (await response.text()).replace(/switch\s*\(command\)\s*\{/, `
+      if (command === 'provider_configuration') return {
+        executablePaths: Object.create({codex: '/inherited/path'}), environment: Object.create({codex: ['INHERITED_SECRET']}),
+        useGlobalEnvironment: Object.create({codex: false}),
+        providers: [['codex', 'Codex'], ['__proto__', 'Bad'], ['constructor', 'Bad'], ['prototype', 'Bad']],
+        mimoEndpoints: [], secureStorageAvailable: false
+      };
+      switch (command) {
+    `);
+    await route.fulfill({ response, body: source });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const settings = page.getByRole('region', { name: 'Settings', exact: true });
+  await settings.getByRole('tab', { name: 'Agents', exact: true }).click();
+  await settings.getByRole('tab', { name: 'Providers', exact: true }).click();
+  const host = page.locator('#settings-panel-providers');
+  await expect(host.locator('[data-executable="codex"]')).toHaveValue('');
+  await expect(host.locator('[data-use-global="codex"]')).toBeChecked();
+  await expect(host.locator('[data-env-list="codex"]')).toBeEmpty();
+  for (const id of ['__proto__', 'constructor', 'prototype']) await expect(host.locator('[data-use-global="' + id + '"]')).toHaveCount(0);
+  await expect(host).not.toContainText('INHERITED_SECRET');
+  expect(errors).toEqual([]);
+});

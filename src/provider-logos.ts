@@ -29,13 +29,15 @@ const logos: Partial<Record<ProviderId, string>> = {
 
 /** Decorative provider mark. The surrounding control supplies its accessible name. */
 export function providerLogo(id: ProviderId, cls = ''): string {
+  const key = typeof id === 'string' ? id : '';
+  const safeId = escape(key);
   const className = `provider-logo${cls ? ` ${escape(cls)}` : ''}`;
   // Monochrome marks are inlined and drawn in the theme's text color.
-  const inline = id === 'github-copilot' ? githubCopilotLogo : id === 'cline' ? clineLogo.replaceAll('#1C1C24', 'currentColor') : id === 'devin' ? devinLogo.replace('fill="black"', 'fill="currentColor"') : id === 'kilo' ? kiloLogo : id === 'zcode' ? zcodeLogo.replace('fill="black"', 'fill="currentColor"') : '';
+  const inline = key === 'github-copilot' ? githubCopilotLogo : key === 'cline' ? clineLogo.replaceAll('#1C1C24', 'currentColor') : key === 'devin' ? devinLogo.replace('fill="black"', 'fill="currentColor"') : key === 'kilo' ? kiloLogo : key === 'zcode' ? zcodeLogo.replace('fill="black"', 'fill="currentColor"') : '';
   if (inline) {
-    return inline.replace('<svg ', `<svg class="${className}" data-provider="${id}" aria-hidden="true" focusable="false" `);
+    return inline.replace('<svg ', `<svg class="${className}" data-provider="${safeId}" aria-hidden="true" focusable="false" `);
   }
-  const src = logos[id];
-  if (!src) return `<span class="${className} provider-logo-tile" data-provider="${id}" aria-hidden="true">${escape(id.charAt(0).toUpperCase())}</span>`;
-  return `<img class="${className}" data-provider="${id}" src="${escape(src)}" width="20" height="20" alt="" aria-hidden="true" draggable="false">`;
+  const src = Object.hasOwn(logos, key) ? logos[key as ProviderId] : undefined;
+  if (!src) return `<span class="${className} provider-logo-tile" data-provider="${safeId}" aria-hidden="true">${escape(key.charAt(0).toUpperCase())}</span>`;
+  return `<img class="${className}" data-provider="${safeId}" src="${escape(src)}" width="20" height="20" alt="" aria-hidden="true" draggable="false">`;
 }

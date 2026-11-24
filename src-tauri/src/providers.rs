@@ -28,6 +28,12 @@ use host_tools::apply_step;
 pub use host_tools::ToolHost;
 pub(crate) mod acp;
 pub(crate) mod acp_catalog;
+/// Invalidate both shared catalogs and ZCode's default-only discovery fallback.
+pub(crate) fn invalidate_catalog(provider: &str) {
+    acp_catalog::invalidate(provider);
+    if provider == "zcode" { zcode::clear_default_cache(); }
+}
+
 #[cfg(test)]
 mod claude_stream_tests;
 mod pool;
@@ -59,7 +65,7 @@ mod zcode;
 mod diagnostics;
 pub(crate) mod claude_auth;
 pub(crate) mod privacy;
-pub(crate) use launch::{command, pty_command, std_command, external_path, executable_path, widen_process_path};
+pub(crate) use launch::{command, enforce_runtime_invariants, pty_command, std_command, external_path, executable_path, widen_process_path};
 #[cfg(test)]
 mod kimi_stream_tests;
 #[cfg(test)]
@@ -846,6 +852,7 @@ pub(crate) fn executable(name: &str) -> Option<PathBuf> {
 pub(crate) fn provider_command(provider: &str, path: &Path) -> Result<Command, String> {
     let mut command = command(path)?;
     crate::provider_settings::apply_environment(provider, &mut command);
+    launch::enforce_runtime_invariants(path, &mut command);
     Ok(command)
 }
 
@@ -988,8 +995,10 @@ fn hook_events_answer(key: PathBuf, help: impl FnOnce() -> Option<String>) -> bo
 /// provider is not installed or the command failed or stalled past `timeout`. Runs with the
 /// provider's saved environment, so a custom data dir reads the same store as its runs.
 pub(crate) fn run_provider(id: &str, args: &[&str], timeout: Duration) -> Option<String> {
-    let mut command = launch::std_command(&executable(id)?).ok()?;
+    let path = executable(id)?;
+    let mut command = launch::std_command(&path).ok()?;
     crate::provider_settings::apply_environment(id, &mut command);
+    launch::enforce_runtime_invariants(&path, &mut command);
     capture(command, args, timeout)
 }
 
@@ -1285,8 +1294,9 @@ fn model_text(value: Option<&str>, fallback: &str, limit: usize) -> String {
         .unwrap_or_default()
         .chars()
         .filter(|c| !c.is_control())
-        .take(limit)
+        .take(limit.saturating_add(1))
         .collect();
+    let text = diagnostics::truncate_grapheme_safe(&text, limit);
     if text.trim().is_empty() {
         fallback.into()
     } else {
@@ -3190,19 +3200,118 @@ impl Drop for StderrReader {
     }
 }
 
-async fn read_stderr(mut stderr: impl tokio::io::AsyncRead + Unpin) -> String {
-    let mut tail = Vec::new();
-    let mut buf = [0u8; 2048];
-    while let Ok(n) = stderr.read(&mut buf).await {
-        if n == 0 {
-            break;
-        }
-        tail.extend_from_slice(&buf[..n]);
-        if tail.len() > STDERR_LIMIT {
-            tail.drain(..tail.len() - STDERR_LIMIT);
+fn drain_utf8(buf: &mut Vec<u8>, flush: bool, mut on_str: impl FnMut(&str)) {
+    let mut consumed = 0;
+    while consumed < buf.len() {
+        match std::str::from_utf8(&buf[consumed..]) {
+            Ok(text) => { on_str(text); consumed = buf.len(); }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                if valid > 0 { on_str(std::str::from_utf8(&buf[consumed..consumed + valid]).unwrap()); consumed += valid; }
+                if let Some(length) = error.error_len() {
+                    on_str("\u{fffd}");
+                    consumed += length;
+                } else {
+                    if flush { on_str("\u{fffd}"); consumed = buf.len(); }
+                    break;
+                }
+            }
         }
     }
-    String::from_utf8_lossy(&tail).trim().to_owned()
+    buf.drain(..consumed);
+}
+
+async fn read_stderr(mut stderr: impl tokio::io::AsyncRead + Unpin) -> String {
+    let mut cleaner = diagnostics::Cleaner::new();
+    let mut kept: VecDeque<String> = VecDeque::new();
+    let mut sum_lens = 0;
+    let mut keep = |mut line: String| {
+        if matches!(line.as_str(), "[Credential detail omitted]" | "[Line over 16 KB omitted]")
+            && kept.back() == Some(&line) { return; }
+        if line.len() > STDERR_LIMIT {
+            line = diagnostics::truncate_bytes_grapheme_safe(&line, STDERR_LIMIT);
+        }
+        sum_lens += line.len();
+        kept.push_back(line);
+        while sum_lens + kept.len().saturating_sub(1) > STDERR_LIMIT { sum_lens -= kept.pop_front().unwrap().len(); }
+    };
+    let mut line = Vec::new();
+    let mut line_open_url = diagnostics::OpenUrlTracker::new();
+    let mut line_utf8 = Vec::with_capacity(4);
+    let mut overflow: Option<diagnostics::OverflowLine> = None;
+    let mut utf8 = Vec::new();
+    let mut pending_cr = false;
+    let mut buf = [0u8; 2048];
+    while let Ok(n) = stderr.read(&mut buf).await {
+        if n == 0 { break; }
+        tokio::task::consume_budget().await;
+        for &byte in &buf[..n] {
+            if pending_cr && byte != b'\n' {
+                pending_cr = false;
+                if let Some(scanner) = &mut overflow {
+                    drain_utf8(&mut utf8, false, |text| scanner.push_str(text));
+                    if scanner.in_open_url_authority() {
+                        utf8.push(b'\r');
+                    } else {
+                        let mut scanner = overflow.take().unwrap();
+                        drain_utf8(&mut utf8, true, |text| scanner.push_str(text));
+                        keep(cleaner.finish_overflow(scanner).to_owned());
+                        line_open_url.clear();
+                        line_utf8.clear();
+                    }
+                } else if line_open_url.keeps_cr() {
+                    line.push(b'\r');
+                    line_open_url.push_raw('\r');
+                    if line.len() >= STDERR_LIMIT {
+                        let mut scanner = cleaner.begin_overflow();
+                        utf8.append(&mut line);
+                        drain_utf8(&mut utf8, false, |text| scanner.push_str(text));
+                        overflow = Some(scanner);
+                    }
+                } else if !line.is_empty() {
+                    keep(cleaner.clean_line(&String::from_utf8_lossy(&line)));
+                    line.clear();
+                    line_open_url.clear();
+                    line_utf8.clear();
+                }
+            }
+            if byte == b'\n' {
+                if let Some(mut scanner) = overflow.take() {
+                    drain_utf8(&mut utf8, true, |text| scanner.push_str(text));
+                    keep(cleaner.finish_overflow(scanner).to_owned());
+                } else {
+                    keep(cleaner.clean_line(&String::from_utf8_lossy(&line)));
+                }
+                line.clear();
+                line_open_url.clear();
+                line_utf8.clear();
+                pending_cr = false;
+                continue;
+            }
+            if byte == b'\r' { pending_cr = true; continue; }
+            if overflow.is_none() && line.len() < STDERR_LIMIT {
+                line.push(byte);
+                line_utf8.push(byte);
+                drain_utf8(&mut line_utf8, false, |text| { for ch in text.chars() { line_open_url.push_raw(ch); } });
+                continue;
+            }
+            if overflow.is_none() {
+                let mut scanner = cleaner.begin_overflow();
+                utf8.append(&mut line);
+                drain_utf8(&mut utf8, false, |text| scanner.push_str(text));
+                overflow = Some(scanner);
+            }
+            utf8.push(byte);
+        }
+        if let Some(scanner) = &mut overflow { drain_utf8(&mut utf8, false, |text| scanner.push_str(text)); }
+    }
+    if let Some(mut scanner) = overflow {
+        drain_utf8(&mut utf8, true, |text| scanner.push_str(text));
+        keep(cleaner.finish_overflow(scanner).to_owned());
+    } else if !line.is_empty() {
+        keep(cleaner.clean_line(&String::from_utf8_lossy(&line)));
+    }
+    kept.into_iter().collect::<Vec<_>>().join("\n").trim().to_owned()
 }
 
 fn process_registry() -> &'static Mutex<HashSet<u32>> {
@@ -3311,11 +3420,15 @@ impl AgentTemp {
             return None;
         }
         let root = crate::secret_store::dir()?.join(AGENT_TEMP_DIR);
-        static SWEPT: std::sync::Once = std::sync::Once::new();
-        SWEPT.call_once(|| Self::sweep(&root));
+        Self::sweep_once(&root);
         let temp = Self::create_in(&root)?;
         command.env("TEMP", &temp.0).env("TMP", &temp.0);
         Some(temp)
+    }
+    fn sweep_once(root: &Path) {
+        static ROOTS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+        let first = ROOTS.get_or_init(Default::default).lock().unwrap_or_else(|p| p.into_inner()).insert(root.to_owned());
+        if first { Self::sweep(root); }
     }
     /// Folders left by a crash or a quit. Only old ones: `pandacode serve` has no single-instance
     /// guard, so another process's agent can be using a recent one.
@@ -3814,6 +3927,7 @@ async fn run_inner(
             ));
         }
     }
+    launch::enforce_runtime_invariants(&path, &mut command);
     if config.provider == "opencode" && !disabled.is_empty() {
         enforce_opencode_after_connection(&mut command, &mut config, &disabled, &opencode_agents);
     }
@@ -4271,6 +4385,301 @@ mod coalesce_tests {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn read_stderr_r16_ansi_mixed_schemes_and_long_escaped_slashes_keep_authorities() {
+        for separator in [r"://", r":/\/", r":\//", r":\/\/"] {
+            for ansi in ["\u{1b}[31m", "\u{1b}[?25l", "\u{1b}]0;a b\u{7}"] {
+                let text = format!("http{separator}user:{ansi}SECRET999\r@proxy:8080\nError: done\n");
+                let result = super::read_stderr(text.as_bytes()).await;
+                assert!(!result.contains("SECRET999"), "{text:?} => {result}");
+                assert!(result.ends_with("Error: done"), "{result}");
+            }
+        }
+        let text = format!(r"http://user:{}\/x", "x".repeat(17000)) + "\r:SECRET999@proxy:8080\nError: done\n";
+        let result = super::read_stderr(text.as_bytes()).await;
+        assert!(!result.contains("SECRET999"), "{result}");
+        assert!(result.ends_with("Error: done"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn read_stderr_r17_oversized_markers_are_explicit_and_deduplicated() {
+        let oversized = format!("Error: {}\n", "x".repeat(17000));
+        assert_eq!(super::read_stderr(oversized.as_bytes()).await, "[Line over 16 KB omitted]");
+        let text = format!("Error: root cause\n{oversized}{oversized}");
+        assert_eq!(super::read_stderr(text.as_bytes()).await, "Error: root cause\n[Line over 16 KB omitted]");
+    }
+
+    #[tokio::test]
+    async fn read_stderr_r19_yaml_overflow_stays_private_until_dedent() {
+        let input = format!("private_key: |\n  {}\n\n  SECRET999_LINE2\nError: done\n", "S".repeat(20000));
+        let result = super::read_stderr(input.as_bytes()).await;
+        assert!(!result.contains("SECRET999") && !result.contains("SSSS"), "{result}");
+        assert!(result.ends_with("Error: done"), "{result}");
+        assert!(!super::diagnostics::failure("Failed", &result).contains("SECRET999"));
+    }
+
+    #[tokio::test]
+    async fn read_stderr_r20_unclipped_url_and_yaml_split_headers() {
+        for input in [
+            "http://user:SECRET999/abc\r@proxy:8080\nError: done",
+            "https://user:SECRET999://bar@api.example.com/v1\nError: done",
+            "api_key:\n  |\n  SECRET999\nError: done",
+            "token:\nError: done",
+        ] {
+            let result = super::read_stderr(input.as_bytes()).await;
+            assert!(!result.contains("SECRET999"), "{input}\n{result}");
+            assert!(result.ends_with("Error: done"), "{input}\n{result}");
+        }
+    }
+
+    #[tokio::test]
+    async fn read_stderr_r20_yields_to_other_ready_tasks() {
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signal = ran.clone();
+        let other = tokio::spawn(async move { signal.store(true, std::sync::atomic::Ordering::Relaxed); });
+        let input = format!("{}\nError: done", "x".repeat(1024 * 1024));
+        let _ = super::read_stderr(input.as_bytes()).await;
+        let was_polled = ran.load(std::sync::atomic::Ordering::Relaxed);
+        other.await.unwrap();
+        assert!(was_polled, "a ready child stream monopolized the executor");
+    }
+
+    #[tokio::test]
+    async fn read_stderr_and_model_text_r23_keep_extended_graphemes_whole() {
+        for cluster in ["कि", "কি", "ကိ", "កិ", "กิ", "か\u{3099}", "بِ", "אִ", "ᠠ\u{180b}", "a\u{200c}", "🇺🇸", "👨‍👩‍👧", "ᄀ각", "\u{1f3f4}\u{e0067}\u{e0062}\u{e007f}"] {
+            assert_eq!(super::model_text(Some(&format!("ab{cluster}end")), "", 3), "ab…", "{cluster}");
+            let prefix = "--token x ".repeat(16);
+            let expansion = 16 * ("[redacted]".len() - 1);
+            let padding = super::STDERR_LIMIT - 4 - expansion - prefix.len();
+            let raw = format!("{prefix}{}{cluster}end", "x".repeat(padding));
+            assert!(raw.len() <= super::STDERR_LIMIT);
+            let result = super::read_stderr(raw.as_bytes()).await;
+            assert!(result.ends_with('…') && result.len() <= super::STDERR_LIMIT, "{cluster}: {result}");
+            assert!(result.chars().all(|ch| ch.is_ascii() || ch == '…'), "{cluster}: {result}");
+        }
+    }
+
+    #[tokio::test]
+    async fn read_stderr_r16_cleaned_expansion_keeps_a_unicode_safe_diagnostic() {
+        let prefix = "Error: ";
+        let suffix = " pass=abcde";
+        let padding = super::STDERR_LIMIT - prefix.len() - suffix.len();
+        let text = format!("{prefix}{}{suffix}", "é".repeat(padding / 2) + &"x".repeat(padding % 2));
+        assert_eq!(text.len(), super::STDERR_LIMIT);
+        let result = super::read_stderr(text.as_bytes()).await;
+        assert!(result.starts_with("Error: "), "{result}");
+        assert!(!result.contains("abcde"));
+        assert!(result.len() <= super::STDERR_LIMIT);
+        assert!(result.ends_with('…'), "{result}");
+    }
+
+
+    #[tokio::test]
+    async fn read_stderr_r14_pem_in_block_overflow_stays_private_until_end() {
+        let text = format!("cookies: [\n \"-----BEGIN PRIVATE KEY-----\"\n \"{}\"\n \"SECRET_PEM_BODY\"\n \"-----END PRIVATE KEY-----\"\n]\nError: done\n", "x".repeat(20000));
+        let result = super::read_stderr(text.as_bytes()).await;
+        assert!(!result.contains("SECRET_PEM_BODY"), "{result}");
+        assert!(result.ends_with("Error: done"), "{result}");
+        for padding in [5000, 20000] {
+            let text = format!("{{\"private_key\": [\"{}-----BEGIN PRIVATE KEY-----\"]}}\nMIIE_SECRET999_BODY\n-----END PRIVATE KEY-----\nok", "x".repeat(padding));
+            let result = super::read_stderr(text.as_bytes()).await;
+            assert!(!result.contains("MIIE_SECRET999_BODY"), "{result}");
+            assert!(result.ends_with("ok"), "{result}");
+        }
+    }
+
+    #[tokio::test]
+    async fn read_stderr_r14_many_cr_inside_authority_remain_private() {
+        let start = std::time::Instant::now();
+        let text = format!("http://user:SECRET999{}@proxy:8080\nError: done\n", "\r".repeat(20000));
+        let result = super::read_stderr(text.as_bytes()).await;
+        assert!(!result.contains("SECRET999"), "{result}");
+        assert!(result.ends_with("Error: done"), "{result}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "{:?}", start.elapsed());
+        for scheme in [r"http\u003a\u002f\u002f", r"http\x3a\u002f\u002f"] {
+            let text = format!("{scheme}user:SECRET999\r@proxy:8080\nError: done");
+            let result = super::read_stderr(text.as_bytes()).await;
+            assert!(!result.contains("SECRET999"), "{result}");
+            assert!(result.ends_with("Error: done"), "{result}");
+        }
+    }
+
+
+    #[tokio::test]
+    async fn read_stderr_r12_bare_bearer_after_url_cr_keeps_continuation_private() {
+        for padding in [0, 5000, 20000] {
+            let stream = format!("https://api.z.ai{}\rBearer\nsk-live-secret-999\nError: done\n", "x".repeat(padding));
+            let result = super::read_stderr(stream.as_bytes()).await;
+            assert!(!result.contains("sk-live-secret-999"), "{result}");
+            assert!(result.ends_with("Error: done"), "{result}");
+        }
+    }
+
+
+    #[tokio::test]
+    async fn read_stderr_r11_overflowed_url_authorities_survive_cr_without_leaking() {
+        for user in ["user".to_owned(), "u".repeat(400)] {
+            let text = format!("{} http://{user}\r:hunter2@proxy:8080\nError: done\n", "x".repeat(16 * 1024));
+            let result = super::read_stderr(text.as_bytes()).await;
+            assert_eq!(result, "[Line over 16 KB omitted]\nError: done");
+            assert!(!super::diagnostics::failure("Provider failed", &result).contains("hunter2"));
+        }
+    }
+
+    #[tokio::test]
+    async fn read_stderr_r11_nested_payload_and_private_pem_overflow() {
+        for text in [
+            format!("Error: body=\"{}{{\\\"cookies\\\": [\n  \"sid=hunter2\"\n]}}\"\n", " ".repeat(20000)),
+            format!("-----BEGIN RSA PRIVATE KEY-----\n{}\nSECRETVALUE\n-----END RSA PRIVATE KEY-----\nok\n", "x".repeat(20000)),
+        ] {
+            let result = super::read_stderr(text.as_bytes()).await;
+            assert!(!result.contains("hunter2") && !result.contains("SECRETVALUE"), "{result}");
+            assert!(!super::diagnostics::failure("Provider failed", &result).contains("hunter2"));
+        }
+    }
+
+
+    #[tokio::test]
+    async fn read_stderr_r10_bare_cr_progress_and_url_credentials() {
+        let progress = (0..2000).map(|n| format!("downloading {n}%\r")).collect::<String>();
+        let result = super::read_stderr(format!("{progress}Error: download failed: ECONNRESET\n").as_bytes()).await;
+        assert!(result.ends_with("Error: download failed: ECONNRESET"), "{result}");
+        assert_eq!(super::read_stderr(b"http://user:sk-secret\r@proxy:8080\n".as_slice()).await, "http://[redacted]@proxy:8080");
+        let result = super::read_stderr(b"Bearer\rsk-secret\nError: done\n".as_slice()).await;
+        assert!(!result.contains("sk-secret"), "{result}");
+        assert!(result.ends_with("Error: done"));
+        assert_eq!(super::read_stderr(b"first\r\rsecond\r".as_slice()).await, "first\nsecond");
+    }
+
+    #[tokio::test]
+    async fn read_stderr_r10_overflowed_payloads_and_multiline_private_keys() {
+        for stream in [
+            format!("Error: body='{{\"padding\":\"{}\",\"cookies\": [\n  \"sid=SENSITIVE_SECRET\"\n]}}'\nError: done\n", "x".repeat(20000)),
+            format!("private_key: \"-----BEGIN PRIVATE KEY-----{}\nMIIE_SECRET\n-----END PRIVATE KEY-----\"\nError: done\n", "x".repeat(20000)),
+            format!("private_key:\n  \"-----BEGIN PRIVATE KEY-----{}\nMIIE_SECRET\n-----END PRIVATE KEY-----\"\nError: done\n", "x".repeat(20000)),
+        ] {
+            let result = super::read_stderr(stream.as_bytes()).await;
+            assert!(!result.contains("SENSITIVE_SECRET") && !result.contains("MIIE_SECRET"), "{result}");
+            assert!(result.ends_with("Error: done"), "{result}");
+        }
+    }
+
+    #[tokio::test]
+    async fn read_stderr_drops_a_partial_first_line_after_truncation() {
+        // A credential line longer than the window: the cut lands after its `api_key=`.
+        let stream = format!("api_key={}\nError: trailing one\nError: trailing two\n", "s".repeat(20_000));
+        let kept = super::read_stderr(stream.as_bytes()).await;
+        assert_eq!(kept, "[Credential detail omitted]\nError: trailing one\nError: trailing two");
+        // A cut on a line boundary keeps every complete line.
+        let line = format!("{}\n", "e".repeat(15));
+        let kept = super::read_stderr(line.repeat(2000).as_bytes()).await;
+        assert_eq!(kept.lines().count(), super::STDERR_LIMIT / line.len());
+        // No line break left in the window: nothing of the partial line survives.
+        assert_eq!(super::read_stderr("x".repeat(40_000).as_bytes()).await, "[Line over 16 KB omitted]");
+        // Cleaning happens before retention even for short streams.
+        assert_eq!(super::read_stderr(&b"  api_key=k\nok \n"[..]).await, "[Credential detail omitted]\nok");
+        assert_eq!(super::read_stderr(&b"  line one\nok \n"[..]).await, "line one\nok");
+    }
+
+    #[tokio::test]
+    async fn read_stderr_cleans_credential_blocks_before_dropping_oversized_lines() {
+        for stream in [
+            format!("{{\n  \"cookies\": [\n    \"{}]\",\n    {{\"value\":\"SENSITIVE_SENTINEL_725\"}}\n  ]\n}}\nError: done\n", "x".repeat(20_000)),
+            format!("cookies:\n[\"{}]\",\n  \"SENSITIVE_SENTINEL_725\"\n]\nError: done\n", "x".repeat(20_000)),
+            format!("{{\n  \"cookies\": [\n    \"{}\",\n    {{\"value\":\"SENSITIVE_SENTINEL_725\"}}\n  ]\n}}\nError: done\n", "x".repeat(20_000)),
+            format!("cookies: [\"{}\",\n  \"SENSITIVE_SENTINEL_725\"\n]\nError: done\n", "x".repeat(20_000)),
+            format!("cookies:\n[\"{}\",\n  \"SENSITIVE_SENTINEL_725\"\n]\nError: done\n", "x".repeat(20_000)),
+        ] {
+            let kept = super::read_stderr(stream.as_bytes()).await;
+            assert!(!kept.contains("SENSITIVE_SENTINEL_725"), "{kept}");
+            assert!(!super::diagnostics::failure("Provider failed", &kept).contains("SENSITIVE_SENTINEL_725"));
+            assert!(kept.ends_with("Error: done"), "{kept}");
+        }
+    }
+
+    #[tokio::test]
+    async fn read_stderr_r9_streams_middle_markers_and_complete_block_closures() {
+        let cases = [
+            format!("{{\"x\":\"{}\",\"blob\":\"{}\",\"cookies\":[\n  \"sid=SENSITIVE_SENTINEL\"\n]\nError: done", "1".repeat(4090), "A".repeat(12000)),
+            format!("cookies: [\"a\",\"{}\",\"blob\":\"{}]\",\n  \"SENSITIVE_COOKIE_2\"\n]\nError: done", "1".repeat(4090), "B".repeat(16000)),
+            format!("{{\"meta\":\"{}\",\"cookies\":[\"{}\",\n  \"SENSITIVE_COOKIE_2\"\n]\nError: done", "x".repeat(8000), "y".repeat(12000)),
+            format!("\"cookies\":\n{}[\n  \"secret1\",\n  \"secret2\"\n]\nError: done", " ".repeat(4096)),
+            format!("\"cookies\":\n{}[\n  \"secret1\",\n  \"secret2\"\n]\nError: done", "prefix".repeat(1000)),
+            format!("\"cookies\":\n{}[\n  \"secret1\",\n  \"secret2\"\n]\nError: done", " ".repeat(17000)),
+            format!("\"api_key\":\n{{\"k\":\"{}\"}}\nError: real cause\n", "x".repeat(20000)),
+        ];
+        for stream in cases {
+            let kept = super::read_stderr(stream.as_bytes()).await;
+            for secret in ["SENSITIVE_SENTINEL", "SENSITIVE_COOKIE_2", "secret1", "secret2"] { assert!(!kept.contains(secret), "{secret}: {kept}"); }
+            assert!(kept.ends_with("Error: done") || kept.ends_with("Error: real cause"), "{kept}");
+        }
+    }
+
+    #[tokio::test]
+    async fn read_stderr_r9_preserves_utf8_escape_and_crlf_chunk_boundaries() {
+        let stream = format!("{}api\u{90}payload\u{9c}_key: [\n  \"SECRET_C1\"\n]\nError: done", " ".repeat(super::STDERR_LIMIT + 2044));
+        let kept = super::read_stderr(stream.as_bytes()).await;
+        assert!(!kept.contains("SECRET_C1"), "{kept}");
+        assert!(kept.ends_with("Error: done"));
+        let prefix = "cookies: [\n  \"";
+        let stream = format!("{prefix}{}\\\"]\",\n  \"SENSITIVE_COOKIE_2\"\n]\r\nError: done\r\n", "x".repeat(super::STDERR_LIMIT + 2047 - prefix.len()));
+        let kept = super::read_stderr(stream.as_bytes()).await;
+        assert!(!kept.contains("SENSITIVE_COOKIE_2"), "{kept}");
+        assert!(kept.ends_with("Error: done"));
+        assert_eq!(super::read_stderr(b"line one\r\nok\r".as_slice()).await, "line one\nok");
+    }
+
+    #[test]
+    fn read_stderr_utf8_decoder_keeps_split_scalars_and_malformed_suffixes() {
+        let input = "😀api\u{90}payload\u{9c}_key".as_bytes();
+        for size in 1..=7 {
+            let mut pending = Vec::new();
+            let mut output = String::new();
+            for chunk in input.chunks(size) {
+                pending.extend_from_slice(chunk);
+                super::drain_utf8(&mut pending, false, |text| output.push_str(text));
+                assert!(pending.len() <= 3);
+            }
+            super::drain_utf8(&mut pending, true, |text| output.push_str(text));
+            assert_eq!(output.as_bytes(), input);
+            assert!(pending.is_empty());
+        }
+        let input = [b'a', 0xff, b'b', 0xf0, 0x9f];
+        let mut pending = input.to_vec();
+        let mut output = String::new();
+        super::drain_utf8(&mut pending, true, |text| output.push_str(text));
+        assert_eq!(output, String::from_utf8_lossy(&input));
+        assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_stderr_keeps_continuation_state_when_window_starts_on_newline() {
+        for (key, ending) in [("  \"api_key\":", "}\nError: done\n"), ("  \"cookies\": [", "]\n}\nError: done\n")] {
+            let secret = "SENSITIVE_SENTINEL_725";
+            let value = format!("  \"{}{secret}\"\n", "x".repeat(super::STDERR_LIMIT - ending.len() - secret.len() - 5));
+            assert_eq!(value.len() + ending.len(), super::STDERR_LIMIT);
+            let stream = format!("{}{{\n{key}\n{value}{ending}", "padding\n".repeat(3000));
+            let kept = super::read_stderr(stream.as_bytes()).await;
+            assert!(!kept.contains(secret), "{kept}");
+            assert!(!super::diagnostics::failure("Provider failed", &kept).contains(secret));
+            assert!(kept.ends_with("Error: done"), "{kept}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn dropping_a_run_does_not_detach_its_stderr_reader() {
+        use tokio::io::AsyncWriteExt;
+        let (reader, mut writer) = tokio::io::duplex(64);
+        let reader = super::StderrReader(tokio::spawn(super::read_stderr(reader)));
+        tokio::task::yield_now().await;
+        drop(reader);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while writer.write_all(&[b'x'; 64]).await.is_ok() {}
+        }).await.expect("dropping the reader owner must close its pipe");
+    }
+
     #[test]
     fn frame_buffer_shrinks_only_when_large_and_drained() {
         assert!(super::should_shrink(10, 2 * 1024 * 1024));

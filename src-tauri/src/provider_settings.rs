@@ -627,7 +627,7 @@ pub async fn provider_set_executable(
         save_executable(&provider, &path)?;
         for provider in &affected {
             crate::agent_usage::invalidate(provider);
-            crate::providers::acp_catalog::invalidate(provider);
+            crate::providers::invalidate_catalog(provider);
             crate::slash_commands::invalidate_provider(provider);
         }
         configuration()
@@ -781,7 +781,7 @@ fn remove_environment_variable(provider: &str, name: &str) -> Result<bool> {
 /// example a proxy) reaches the next catalog, command and usage query.
 fn refresh_provider(app: &tauri::AppHandle, provider: &str, result: Configuration) -> Result<Configuration> {
     crate::agent_usage::invalidate(provider);
-    crate::providers::acp_catalog::invalidate(provider);
+    crate::providers::invalidate_catalog(provider);
     crate::slash_commands::invalidate_provider(provider);
     let _ = app.emit("provider-models-changed", serde_json::json!({"provider":provider}));
     Ok(result)
@@ -791,7 +791,7 @@ fn refresh_provider(app: &tauri::AppHandle, provider: &str, result: Configuratio
 fn refresh_all(app: &tauri::AppHandle, result: Configuration) -> Result<Configuration> {
     for (provider, _) in crate::providers::PROVIDERS {
         crate::agent_usage::invalidate(provider);
-        crate::providers::acp_catalog::invalidate(provider);
+        crate::providers::invalidate_catalog(provider);
         crate::slash_commands::invalidate_provider(provider);
         // Listeners match literal provider ids, so each one gets its own event.
         let _ = app.emit("provider-models-changed", serde_json::json!({"provider":provider}));
@@ -1022,7 +1022,7 @@ pub async fn provider_save_deepseek_key(key: String) -> Result<Configuration> {
     crate::blocking(move || {
         save_key(DEEPSEEK_KEY, &key)?;
         crate::agent_usage::invalidate("deepseek");
-        crate::providers::acp_catalog::invalidate("deepseek");
+        crate::providers::invalidate_catalog("deepseek");
         configuration()
     })
     .await
@@ -1032,7 +1032,7 @@ pub async fn provider_remove_deepseek_key() -> Result<Configuration> {
     crate::blocking(|| {
         remove_key(DEEPSEEK_KEY)?;
         crate::agent_usage::invalidate("deepseek");
-        crate::providers::acp_catalog::invalidate("deepseek");
+        crate::providers::invalidate_catalog("deepseek");
         configuration()
     })
     .await
@@ -1041,7 +1041,7 @@ pub async fn provider_remove_deepseek_key() -> Result<Configuration> {
 pub async fn provider_save_commandcode_key(key: String) -> Result<Configuration> {
     crate::blocking(move || {
         save_key(COMMANDCODE_KEY, &key)?;
-        crate::providers::acp_catalog::invalidate("commandcode");
+        crate::providers::invalidate_catalog("commandcode");
         configuration()
     })
     .await
@@ -1050,7 +1050,7 @@ pub async fn provider_save_commandcode_key(key: String) -> Result<Configuration>
 pub async fn provider_remove_commandcode_key() -> Result<Configuration> {
     crate::blocking(|| {
         remove_key(COMMANDCODE_KEY)?;
-        crate::providers::acp_catalog::invalidate("commandcode");
+        crate::providers::invalidate_catalog("commandcode");
         configuration()
     })
     .await

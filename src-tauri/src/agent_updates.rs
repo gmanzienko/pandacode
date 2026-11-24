@@ -658,7 +658,7 @@ pub async fn update_agent(
         );
         invalidate();
         for alias in &row.providers {
-            crate::providers::acp_catalog::invalidate(alias);
+            crate::providers::invalidate_catalog(alias);
             crate::slash_commands::invalidate_provider(alias);
             crate::agent_usage::invalidate(alias);
             let _ = app.emit(

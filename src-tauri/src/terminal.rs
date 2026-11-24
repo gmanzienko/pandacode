@@ -462,6 +462,7 @@ fn harness_command(context: &HarnessContext<'_>, root: &Path) -> Result<CommandB
     }
     let mut cmd = crate::providers::pty_command(&executable)?;
     crate::provider_settings::apply_environment(context.provider, &mut cmd);
+    crate::providers::enforce_runtime_invariants(&executable, &mut cmd);
     for name in crate::providers::claude_auth::removed_environment(context.provider) { cmd.env_remove(name); }
     if context.provider == "qoder" {
         crate::providers::qoder::scrub_sdk_environment(&mut cmd);

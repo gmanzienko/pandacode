@@ -396,6 +396,12 @@ Closing the app also drops the input channel and stops the group. Runtime output
 uses bounded frames (4 MiB maximum) and a 16 KiB stderr tail. No Node/Python SDK host
 or network bridge runs inside PandaCode.
 
+Failure diagnostics are sanitized before reaching the UI: credentials, auth headers,
+tokens and URL userinfo are redacted, with `[Credential detail omitted]` replacing
+omitted credential lines. Oversized lines become `[Line over 16 KB omitted]` in
+streaming stderr or `[Line over 64 KB omitted]` in bounded RPC/error output. Very
+large outputs retain head and tail context separated by `[Output truncated]`.
+
 ## Response streaming
 
 Complete newline-delimited JSON events are forwarded as soon as stdout supplies
@@ -1009,9 +1015,27 @@ process is trusted like any local CLI. Each run spawns one `zcode app-server` an
 speaks `session/create` → `session/subscribe` → `session/send`, mirroring how the
 ZCode desktop app drives the same binary.
 
-**Sign-in.** ZCode owns its authentication; sign in once with `zcode` in a terminal.
-PandaCode never handles credentials. If the account is not signed in, the turn stops
-with “ZCode requires sign-in. Run `zcode` in a terminal and sign in, then send again.”
+**Sign-in.** ZCode owns its authentication; sign in once in the ZCode desktop app,
+or run `zcode` in a terminal when using the standalone CLI. PandaCode never handles
+credentials. If the account is not signed in, the turn stops with “ZCode requires
+sign-in. Sign in via the ZCode desktop app (or run `zcode` in a terminal if using
+the standalone CLI), then send again.”
+
+On ZCode 3.19+ (including 4.0+), Z.ai/BigModel account plans stay inside the
+desktop app and are not offered over `app-server`. Configure an API-key provider in
+ZCode Desktop's Provider Settings or directly in `~/.zcode/v2/provider_config.json`
+for the standalone CLI. These providers are exposed over `app-server` and show up
+as models; for Z.ai Coding Plan models, use
+PandaCode's **GLM Coding Plan** provider instead. When the catalog is empty and the
+session has no model, discovery and sends stop with that guidance instead of
+starting a turn that cannot answer.
+
+When PandaCode runs the CLI bundled with the desktop app, it starts it on the
+app's own Electron runtime and, if `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` is unset,
+empty or only whitespace, points it at the bundle's
+`resources/config/provider/zcode-builtin.json`. A non-empty value set in Settings,
+a named connection or the environment wins; an empty or whitespace value from any
+of them still falls back to the bundle's file.
 
 **Models and effort.** Model discovery opens a throwaway session and reads the
 catalog from the `session/create` snapshot (`settings.model.available`), never
@@ -1073,6 +1097,18 @@ a fresh deferred session may answer session-not-found there until its first
 send. Coding Plan quota itself is the desktop app's account state and is not
 exposed on this protocol. Event names during a real turn were not re-recorded
 (no prompt was sent), so streaming frames stay pinned to the 3.16.3 recordings.
+
+Re-verified without a prompt on 2026-11-23 against the CLI bundled with ZCode
+Desktop 3.19.1 and 4.0.0 (`CLI 0.18.0`): with only desktop-managed account plans
+the `session/create` catalog is empty, while API-key providers from Provider
+Settings appear in it. The bundled `zcode.cjs` loads its keyring addon through
+native ESM `import()` (so `NODE_PATH` has no effect) and `app-server` never loads
+it, so PandaCode sets only `ELECTRON_RUN_AS_NODE` and the built-in provider config
+path; `ELECTRON_RUN_AS_NODE=1` is re-applied after Settings and named-connection
+environment so the bundled runtime always stays in headless Node mode, and the
+built-in provider config path is restored there too when that environment sets
+`ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` to an empty or whitespace value (a non-empty
+value is left untouched).
 
 ## Hermes Agent
 

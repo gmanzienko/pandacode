@@ -52,7 +52,8 @@ function place(): void {
   // A pinned mark sits in a panel's header area: prefer below it, so the bubble leaves the title and controls clear.
   const fitsBelow = rect.bottom + gap + height <= innerHeight - margin;
   const above = !(pinned && fitsBelow) && rect.top - height - gap >= margin;
-  const top = above ? rect.top - height - gap : rect.bottom + gap;
+  // Clamped to the viewport, so a tall tip (a long error) never renders off-screen.
+  const top = Math.max(margin, Math.min(above ? rect.top - height - gap : rect.bottom + gap, Math.max(margin, innerHeight - height - margin)));
   const left = Math.max(margin, Math.min(rect.left + rect.width / 2 - width / 2, innerWidth - width - margin));
   bubble.style.top = `${Math.round(top)}px`;
   bubble.style.left = `${Math.round(left)}px`;

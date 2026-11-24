@@ -3685,6 +3685,7 @@ dependencies = [
  "tokio-tungstenite",
  "toml 0.9.12+spec-1.1.0",
  "transcribe-cpp",
+ "unicode-segmentation",
  "uuid",
  "webkit2gtk",
  "webpki-roots 0.26.11",

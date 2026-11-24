@@ -711,7 +711,7 @@ button:not(:disabled):active{background-color:var(--accent-dim);transition:none}
 .info-mark .icon{--icon-size:var(--icon-sm);--icon-stroke:var(--icon-stroke-sm)}
 .info-mark:focus-visible{outline:2px solid var(--focus);outline-offset:1px;color:var(--text)}
 button:hover>.info-mark,button:focus-visible>.info-mark,.info-mark:hover{color:var(--text)}
-.tip-bubble{position:fixed;z-index:90;max-width:280px;padding:7px 10px;border-radius:var(--radius-sm);background:color-mix(in srgb,var(--text) 94%,transparent);color:var(--bg);font-size:var(--text-xs);line-height:1.45;font-weight:var(--weight-regular);letter-spacing:0;text-align:left;pointer-events:none;box-shadow:0 10px 28px -10px rgb(0 0 0 / .45);opacity:0;transform:translateY(3px)}
+.tip-bubble{position:fixed;z-index:90;max-width:280px;max-height:min(240px,calc(100vh - 20px));overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:12;overflow-wrap:anywhere;padding:7px 10px;border-radius:var(--radius-sm);background:color-mix(in srgb,var(--text) 94%,transparent);color:var(--bg);font-size:var(--text-xs);line-height:1.45;font-weight:var(--weight-regular);letter-spacing:0;text-align:left;pointer-events:none;box-shadow:0 10px 28px -10px rgb(0 0 0 / .45);opacity:0;transform:translateY(3px)}
 .tip-bubble[data-placement="below"]{transform:translateY(-3px)}
 .tip-bubble.tip-visible{opacity:1;transform:none}
 @media(prefers-contrast:more){.tip-bubble{outline:1px solid var(--bg)}}

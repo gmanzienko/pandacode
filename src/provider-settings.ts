@@ -132,7 +132,7 @@ export function mountProviderSettings(host: HTMLElement, saved: () => Promise<un
     <details class="connection-card"><summary><h3>${providerLogo('devin')}Devin CLI<small>Cognition, via ACP</small></h3><span class="connection-state"></span>${icon('chevron')}</summary><p>Install with <code>curl -fsSL https://cli.devin.ai/install.sh | bash</code> (or <code>brew install --cask devin-cli</code>), then run <code>devin auth login</code> once in a terminal. PandaCode talks to <code>devin acp</code> with that sign-in; the CLI bundled with Devin Desktop works too.</p><div class="connection-model-actions"><a href="https://docs.devin.ai/cli" target="_blank" rel="noopener noreferrer">Install and sign in ${icon('forward')}</a><a href="https://docs.devin.ai/cli/reference/commands" target="_blank" rel="noopener noreferrer">ACP details ${icon('forward')}</a></div>${pathForm('devin', 'Devin executable', '/path/to/devin')}${envDetails('devin')}</details>
     <details class="connection-card"><summary><h3>${providerLogo('kilo')}Kilo Code<small>via ACP</small></h3><span class="connection-state"></span>${icon('chevron')}</summary><p>Install with <code>npm i -g @kilocode/cli</code>, then sign in with <code>kilo auth login</code>. PandaCode talks to <code>kilo acp</code> and uses the accounts and models configured in Kilo.</p><a href="https://kilo.ai/docs/code-with-ai/platforms/cli" target="_blank" rel="noopener noreferrer">Kilo CLI docs ${icon('forward')}</a>${pathForm('kilo', 'Kilo executable', '/path/to/kilo')}${envDetails('kilo')}</details>
     <details class="connection-card"><summary><h3>${providerLogo('muse')}Muse Code<small>Meta, via MSP</small></h3><span class="connection-state"></span>${icon('chevron')}</summary><p>Install Muse Code, then run <code>muse login</code> once in a terminal. PandaCode talks to <code>muse serve</code> and uses that sign-in.</p>${pathForm('muse', 'Muse Code executable', '/path/to/muse')}${envDetails('muse')}</details>
-    <details class="connection-card"><summary><h3>${providerLogo('zcode')}ZCode<small>via app-server</small></h3><span class="connection-state"></span>${icon('chevron')}</summary><p>Run <code>zcode</code> in a terminal and sign in. PandaCode talks to it over its app-server protocol.</p><a href="https://github.com/zai-org/ZCode" target="_blank" rel="noopener noreferrer">ZCode docs ${icon('forward')}</a>${pathForm('zcode', 'ZCode executable', '/path/to/zcode')}${envDetails('zcode')}</details>
+    <details class="connection-card"><summary><h3>${providerLogo('zcode')}ZCode<small>via app-server</small></h3><span class="connection-state"></span>${icon('chevron')}</summary><p>Uses the ZCode desktop app or standalone CLI — sign in via the ZCode desktop app, or run <code>zcode</code> in a terminal if using the standalone CLI. PandaCode talks to it over its app-server protocol. On ZCode 3.19+, Z.ai/BigModel account plans stay inside the ZCode desktop app — configure an API-key provider in ZCode Desktop’s Provider Settings or in <code>~/.zcode/v2/provider_config.json</code> for the standalone CLI, or use GLM Coding Plan in PandaCode.</p><a href="https://github.com/zai-org/ZCode" target="_blank" rel="noopener noreferrer">ZCode docs ${icon('forward')}</a>${pathForm('zcode', 'ZCode executable', '/path/to/zcode')}${envDetails('zcode')}</details>
     <details class="connection-card"><summary><h3>${providerLogo('hermes')}Hermes Agent<small>Nous Research, via ACP</small></h3><span class="connection-state"></span>${icon('chevron')}</summary><p>Install with <code>curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash</code>, then run <code>hermes acp --setup</code> or configure <code>~/.hermes/config.yaml</code>. PandaCode talks to <code>hermes acp</code>.</p><div class="connection-model-actions"><a href="https://hermes-agent.org" target="_blank" rel="noopener noreferrer">Hermes docs ${icon('forward')}</a><a href="https://github.com/NousResearch/hermes-agent" target="_blank" rel="noopener noreferrer">GitHub repository ${icon('forward')}</a></div>${pathForm('hermes', 'Hermes Agent executable', '/path/to/hermes')}${envDetails('hermes')}</details>
     <details class="connection-card"><summary><h3>${providerLogo('qoder')}Qoder<small>via ACP</small></h3><span class="connection-state"></span>${icon('chevron')}</summary><p>Install with <code>npm i -g @qoder-ai/qodercli</code>, then sign in once with <code>qodercli login</code>. PandaCode talks to <code>qodercli --acp</code> and uses the sign-in and models configured in Qoder.</p><a href="https://docs.qoder.com/en/cli/installation" target="_blank" rel="noopener noreferrer">Qoder CLI docs ${icon('forward')}</a>${pathForm('qoder', 'Qoder executable', '/path/to/qodercli')}${envDetails('qoder')}</details>
     <p class="connection-feedback" role="status" hidden></p>${preview ? '<p class="settings-preview-note">Browser preview · keys are never saved here.</p>' : ''}`;
@@ -182,26 +182,27 @@ export function mountProviderSettings(host: HTMLElement, saved: () => Promise<un
   function message(text: string, error = false): void { feedback.textContent = text; feedback.hidden = false; feedback.classList.toggle('error', error); }
   function keysDisabled(config: Configuration): boolean { return !config.secureStorageAvailable || preview; }
   function render(config: Configuration): void {
+    const pathFor = (id: string) => Object.hasOwn(config.executablePaths, id) ? config.executablePaths[id] : '';
     // One card, once, for each harness in the roster without a hand-written
     // one. Ids reach attributes and selectors, so only plain ones are drawn.
     if (!generatedMounted) {
       generatedMounted = true;
-      const cards = (config.providers ?? []).filter(([id]) => /^[a-z0-9-]+$/.test(id) && !host.querySelector(`[data-use-global="${id}"]`)).map(([id, name]) => generatedCard(id, name)).join('');
+      const cards = (config.providers ?? []).filter(([id]) => /^[a-z0-9-]+$/.test(id) && !['__proto__', 'constructor', 'prototype'].includes(id) && !host.querySelector(`[data-use-global="${id}"]`)).map(([id, name]) => generatedCard(id, name)).join('');
       feedback.insertAdjacentHTML('beforebegin', cards);
     }
     if (!claudeEdited) claudeMode.value = config.claudeConnectionMode ?? 'inherit';
     claudeRefresh.checked = config.claudeCliRefresh ?? true;
     for (const input of host.querySelectorAll<HTMLInputElement>('[data-executable]')) {
       const id = input.dataset.executable!;
-      if (!editedPaths.has(input)) input.value = config.executablePaths[id] ?? '';
+      if (!editedPaths.has(input)) input.value = pathFor(id);
       // Claude's card shows its sign-in (checkClaude); a keyed card its key, below.
       if (input.closest('#claude-connection')) continue;
-      if (config.executablePaths[id]) cardState(input, 'Custom path', 'info');
+      if (pathFor(id)) cardState(input, 'Custom path', 'info');
       else cardState(input, installedState(id));
     }
     const globals = config.globalEnvironment?.length ?? 0;
     cardState(host.querySelector('#global-environment summary')!, globals ? `${globals} variable${globals === 1 ? '' : 's'}` : 'None');
-    const envNames = (key: string) => key === '*' ? config.globalEnvironment ?? [] : config.environment?.[key] ?? [];
+    const envNames = (key: string) => key === '*' ? config.globalEnvironment ?? [] : config.environment && Object.hasOwn(config.environment, key) ? config.environment[key] : [];
     for (const list of host.querySelectorAll<HTMLElement>('[data-env-list]')) {
       const key = list.dataset.envList!;
       list.replaceChildren(...envNames(key).map(name => {
@@ -212,7 +213,7 @@ export function mountProviderSettings(host: HTMLElement, saved: () => Promise<un
       }));
     }
     for (const toggle of host.querySelectorAll<HTMLInputElement>('[data-use-global]')) {
-      toggle.checked = config.useGlobalEnvironment?.[toggle.dataset.useGlobal!] ?? true;
+      toggle.checked = config.useGlobalEnvironment && Object.hasOwn(config.useGlobalEnvironment, toggle.dataset.useGlobal!) ? config.useGlobalEnvironment[toggle.dataset.useGlobal!] : true;
     }
     for (const provider of Object.keys(keyed) as KeyedProvider[]) {
       const spec = keyed[provider];
@@ -223,7 +224,7 @@ export function mountProviderSettings(host: HTMLElement, saved: () => Promise<un
       if (config[spec.savedFlag]) cardState(status, 'Key saved', 'success');
       else if (config[spec.envFlag]) cardState(status, 'From environment', 'info');
       else if (config.credentialStorageError) cardState(status, 'Storage error', 'danger');
-      else if (!config.executablePaths[provider]) cardState(status, 'No key');
+      else if (!pathFor(provider)) cardState(status, 'No key');
       host.querySelector<HTMLButtonElement>(`#${provider}-key-form button`)!.disabled = keysDisabled(config);
       if (!config.secureStorageAvailable) status.textContent += ` Set ${spec.env} in the app environment on this platform.`;
       else if (config.credentialStorageError) status.textContent += ` ${config.credentialStorageError} You can also set ${spec.env} in the app environment.`;
