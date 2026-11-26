@@ -570,11 +570,11 @@ for (const { model, tier } of [
   else await expect.soft(note).toHaveText(`${tier === 'fast' ? 'Fast' : 'Ultrafast'} is not available for ${model}; this worker will use the default speed only if you save it that way.`);
   // Exercise native-compatible validation of the submitted draft, not only the displayed selection.
   await setup.getByRole('button', { name: 'Save setup', exact: true }).click();
+  await expect(setup).toHaveCount(0);
   const worker = (await calls(page, 'architect_configure')).at(-1).args.config.workers[0];
   expect(worker).toMatchObject({ provider: 'codex', model });
   if (supported) expect(worker.serviceTier).toBe(tier);
   else expect(worker).not.toHaveProperty('serviceTier');
-  await expect(setup).toHaveCount(0);
 });
 
 for (const discovery of ['pending', 'failed']) test(`classic Codex profile reselect preserves saved tier while discovery is ${discovery}`, async ({ page }) => {
