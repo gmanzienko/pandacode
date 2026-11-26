@@ -123,6 +123,10 @@ test('Settings shows an About section with the version and GitHub links', async 
   await settings.getByRole('tab', { name: 'About', exact: true }).click();
   const about = settings.locator('.settings-about');
   await expect(about).toBeVisible();
+  await expect(about.locator('.settings-fork-notice')).toBeVisible();
+  await expect(about).toContainText('This is a fork of PandaCode');
+  await expect(about).toContainText('https://github.com/aicodeking/pandacode');
+  await expect(about.getByRole('button', { name: 'Upstream PandaCode', exact: true })).toHaveAttribute('data-url', 'https://github.com/aicodeking/pandacode');
   await expect(about.locator('.settings-about-version')).toHaveText('Version Preview');
   const urls = await about.locator('[data-action="open-url"]').evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.url));
   expect(urls).toEqual(expect.arrayContaining([
