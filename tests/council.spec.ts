@@ -774,6 +774,7 @@ test('motion: the strip enters when the first round starts, and never animates t
   await recordMotion(page);
   // A settled, dismissed strip comes back when the next round starts: it enters then.
   await open(page, '/?council=fixing');
+  await expect(strip(page)).toBeVisible();
   await settle(page);
   await page.evaluate(() => (window as any).__councilAsk());
   await strip(page).getByRole('button', { name: 'Accept and finish' }).click();

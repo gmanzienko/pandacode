@@ -1056,9 +1056,9 @@ transcriptScroller.addEventListener('scroll', () => {
   // reader asking for history: drawing it here would widen every thread as it opens, only for the trim to cut it again.
   if (stickToBottom && top >= lastTranscriptTop) { lastTranscriptTop = top; return; }
   // Native focus/anchoring scrolls after Read more are not the reader asking to follow again.
-  if (resumeFollow && transcriptGap() <= 2) stickToBottom = true;
-  // Content that shrank clamps the scroll up (the old top is past the end now): that is not the reader leaving.
-  else if (stickToBottom && lastTranscriptTop > transcriptScroller.scrollHeight - transcriptScroller.clientHeight) followTranscript();
+  // Compensate a native clamp before re-arming can overwrite the previous scroll position.
+  if (stickToBottom && lastTranscriptTop > scrollEnd) followTranscript();
+  else if (resumeFollow && transcriptGap() <= 2) stickToBottom = true;
   else if (top < lastTranscriptTop) stickToBottom = false;
   lastTranscriptTop = transcriptScroller.scrollTop;
   if (!stickToBottom) void loadOlderMessages();

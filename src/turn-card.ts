@@ -176,8 +176,9 @@ export function bridgeCard(card: HTMLElement, from: number): EffectTiming | unde
   const distance = Math.abs(to - from);
   // Either curve keeps the edge under ~16 px a frame: ease-out starts at ~4.5× its mean speed, the in-out peaks at ~2.2×.
   // Past ~40 px (a footer row) the edge ramps in on the in-out curve over at least 260 ms, so its first frame is a few px, not 8–14.
+  // Short footer growth also keeps its 16 px paint budget on 30 Hz Windows displays.
   const gentle = distance > 40;
-  const duration = gentle ? Math.min(BRIDGE_MAX_MS, Math.max(260, distance * 2.2)) : Math.max(FOOT_GROW_MS, distance * 4.6);
+  const duration = gentle ? Math.min(BRIDGE_MAX_MS, Math.max(260, distance * 2.2)) : Math.max(FOOT_GROW_MS, distance * 9.2);
   const timing = { duration, easing: gentle ? EASE_IN_OUT : EASE_OUT };
   const animation = card.animate([{ height: `${from}px` }, { height: `${to}px` }], timing);
   animation.onfinish = animation.oncancel = () => { card.style.overflow = ''; };
